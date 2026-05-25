@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+data/uploads/*
+data/outputs/*
+data/tmp/*
+!data/uploads/.gitkeep
+!data/outputs/.gitkeep
+!data/tmp/.gitkeep
+apps/*/data/uploads/*
+apps/*/data/outputs/*
+apps/*/data/tmp/*
+npm-debug.log*

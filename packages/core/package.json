@@ -1,0 +1,20 @@
+{
+  "name": "@byteproject/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@byteproject/knowledge": "0.1.0",
+    "@byteproject/shared": "0.1.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0"
+  }
+}
+
