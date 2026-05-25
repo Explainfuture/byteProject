@@ -59,7 +59,34 @@ export function createMockTranscript(productName = "智能随行杯"): Transcrip
   ];
 }
 
-export function analyzeSampleVideo(video: VideoMetadata, transcript = createMockTranscript()): SampleAnalysis {
+type AnalysisOptions = {
+  persist?: boolean;
+};
+
+type BriefDrivenTranscriptSource = Pick<SourceInput, "prompt" | "productName" | "sellingPoints" | "targetAudience" | "tone" | "targetDurationSec">;
+
+export function createBriefDrivenTranscript(source: Partial<BriefDrivenTranscriptSource>, video?: Pick<VideoMetadata, "fileName" | "durationSec" | "width" | "height">): TranscriptLine[] {
+  const total = clamp(source.targetDurationSec || video?.durationSec || 18, 6, 180);
+  const cuts = [0, total * 0.12, total * 0.3, total * 0.7, total * 0.86, total].map((value) => Number(value.toFixed(1)));
+  const productName = cleanBriefText(source.productName) || "待定商品";
+  const targetAudience = cleanBriefText(source.targetAudience) || "目标用户";
+  const tone = cleanBriefText(source.tone) || "清晰、有节奏";
+  const prompt = cleanBriefText(source.prompt) || `围绕 ${productName} 生成短视频方案`;
+  const sellingPoints = (source.sellingPoints ?? []).map(cleanBriefText).filter(Boolean);
+  const primaryPoint = sellingPoints[0] ?? "核心卖点";
+  const supportingPoints = sellingPoints.slice(1, 3).join(" / ") || "补充卖点与使用场景";
+  const videoBasis = video ? `${video.fileName}${video.width && video.height ? ` ${inferOrientation(video.width, video.height)}` : ""}` : "上传视频";
+
+  return [
+    { startSec: cuts[0], endSec: cuts[1], text: `结构依据：${videoBasis}，迁移开头吸引方式` },
+    { startSec: cuts[1], endSec: cuts[2], text: `${productName}：${primaryPoint}` },
+    { startSec: cuts[2], endSec: cuts[3], text: `卖点推进：${supportingPoints}` },
+    { startSec: cuts[3], endSec: cuts[4], text: `${targetAudience}场景：${tone}表达` },
+    { startSec: cuts[4], endSec: cuts[5], text: `收口：${shortText(prompt, 28)}` }
+  ];
+}
+
+export function analyzeSampleVideo(video: VideoMetadata, transcript = createMockTranscript(), options: AnalysisOptions = {}): SampleAnalysis {
   const seed = knowledgeStore.retrieve({ vertical: "marketing", limit: 1 })[0];
   const atoms = deriveAtomsFromTranscript(transcript, seed.atoms);
   const slots = seed.structureSlots.map((slot, index) => ({
@@ -79,7 +106,7 @@ export function analyzeSampleVideo(video: VideoMetadata, transcript = createMock
     packagingPattern: ["标题条开场", "卖点卡片补足信息", "CTA 按钮式收尾"],
     applicableWhen: ["商品推广", "素材需要重构", "目标 10-20 秒短视频"]
   };
-  knowledgeStore.add(entry);
+  if (options.persist !== false) knowledgeStore.add(entry);
 
   return {
     video,
@@ -123,23 +150,29 @@ function enrichIntent(intent: string, line?: string) {
   return line ? `${intent}；样例表达抽象为“${line.replace(/[。！？!?]/g, "")}”这一类功能。` : intent;
 }
 
-export function segmentLongVideo(video: VideoMetadata, prompt: string): MaterialSegment[] {
-  const duration = Math.max(video.durationSec, 18);
-  const segmentCount = Math.min(8, Math.max(5, Math.ceil(duration / 8)));
+export function segmentLongVideo(video: VideoMetadata, prompt: string, targetDurationSec?: number): MaterialSegment[] {
+  const duration = Math.max(video.durationSec, 1);
+  const segmentCount = Math.min(8, Math.max(3, Math.ceil(duration / 2)));
   const segmentDuration = duration / segmentCount;
+  const coverageRatio = targetDurationSec ? Math.min(1, duration / Math.max(targetDurationSec, 1)) : 1;
+  const coveragePenalty = coverageRatio < 0.5 ? 0.28 : coverageRatio < 0.75 ? 0.14 : 0;
 
   return Array.from({ length: segmentCount }, (_, index) => {
     const startSec = Number((index * segmentDuration).toFixed(1));
     const endSec = Number(Math.min(duration, (index + 1) * segmentDuration).toFixed(1));
     const assetTypes = inferSegmentAssetTypes(index, segmentCount, prompt);
+    const confidence = Math.max(0.22, 0.62 + Math.min(0.28, index * 0.04) - coveragePenalty);
     return {
       id: `seg-${index + 1}`,
       startSec,
       endSec,
       label: `${startSec}s-${endSec}s 候选片段`,
       assetTypes,
-      confidence: Number((0.62 + Math.min(0.28, index * 0.04)).toFixed(2)),
-      notes: `适合用作${assetTypes.map((type) => assetLabels[type]).join("、")}。`
+      confidence: Number(confidence.toFixed(2)),
+      notes:
+        coveragePenalty > 0
+          ? `原视频短于目标成片，${assetTypes.map((type) => assetLabels[type]).join("、")}只能弱支撑，需要包装或复用补全。`
+          : `适合用作${assetTypes.map((type) => assetLabels[type]).join("、")}。`
     };
   });
 }
@@ -164,8 +197,10 @@ export function matchSlots(slots: StructureSlot[], segments: MaterialSegment[]):
 
     const best = ranked[0];
     const exactTypes = best?.segment.assetTypes.filter((type) => slot.requiredAssetTypes.includes(type)) ?? [];
-    const status: SlotMatch["status"] = exactTypes.length > 0 ? "matched" : slot.requiredAssetTypes.includes("text_card") ? "weak_match" : "missing";
-    const confidence = status === "matched" ? Math.min(0.95, best.score / 2) : status === "weak_match" ? 0.48 : 0.18;
+    const hasExactType = exactTypes.length > 0;
+    const isLowConfidence = (best?.segment.confidence ?? 0) < 0.55;
+    const status: SlotMatch["status"] = hasExactType && !isLowConfidence ? "matched" : hasExactType || slot.requiredAssetTypes.includes("text_card") ? "weak_match" : "missing";
+    const confidence = status === "matched" ? Math.min(0.95, best.score / 2) : status === "weak_match" ? Math.max(0.34, Math.min(0.54, best?.segment.confidence ?? 0.42)) : 0.18;
 
     return {
       slotId: slot.id,
@@ -176,7 +211,9 @@ export function matchSlots(slots: StructureSlot[], segments: MaterialSegment[]):
         status === "matched"
           ? `匹配到 ${best.segment.label}，覆盖 ${exactTypes.map((type) => assetLabels[type]).join("、")}。`
           : status === "weak_match"
-            ? "没有直接镜头，但可用文案卡片或包装层承接表达。"
+            ? hasExactType
+              ? `仅弱匹配 ${best.segment.label}，原素材时长或画面覆盖不足，需要用包装层、裁切复用或文案补强。`
+              : "没有直接镜头，但可用文案卡片或包装层承接表达。"
             : `缺少 ${slot.requiredAssetTypes.map((type) => assetLabels[type]).join("、")}。`
     };
   });
@@ -235,7 +272,7 @@ export function composePlan(input: {
     slotMatches: matches,
     rationale: [
       "从样例中迁移结构原子，而不是复用样例内容。",
-      "长视频素材先粗切成候选片段，再按槽位匹配。",
+      "上传视频会先抽帧并粗分成候选画面，再评估各结构槽位的支撑度。",
       "缺口使用文案、包装卡片和素材复用补全。"
     ]
   };
@@ -335,7 +372,7 @@ function buildScript(source: SourceInput, slots: StructureSlot[], matches: SlotM
 
 export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
   const sampleVideo = createMockVideo("sample", "爆款样例.mp4");
-  const materialVideo = createMockVideo("material", "评测长视频素材.mp4");
+  const materialVideo: VideoMetadata = { ...sampleVideo, role: "material" };
   const fullSource: SourceInput = {
     sampleVideoIds: [sampleVideo.id],
     materialVideoId: materialVideo.id,
@@ -349,9 +386,9 @@ export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
     strategy: source?.strategy ?? "balanced"
   };
 
-  const sample = analyzeSampleVideo(sampleVideo, createMockTranscript(fullSource.productName));
+  const sample = analyzeSampleVideo(sampleVideo, createMockTranscript(fullSource.productName), { persist: false });
   const knowledge = knowledgeStore.retrieve({ vertical: "marketing", prompt: fullSource.prompt, limit: 2 });
-  const segments = segmentLongVideo(materialVideo, fullSource.prompt);
+  const segments = segmentLongVideo(materialVideo, fullSource.prompt, fullSource.targetDurationSec);
   const generated = composePlan({ source: fullSource, samples: [sample], knowledge, materialSegments: segments });
 
   return {
@@ -380,3 +417,16 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function cleanBriefText(value: string | undefined) {
+  return value?.replace(/\s+/g, " ").trim() ?? "";
+}
+
+function shortText(value: string, maxLength: number) {
+  const text = cleanBriefText(value);
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function inferOrientation(width: number, height: number) {
+  if (Math.abs(width - height) < 2) return "方屏";
+  return width > height ? "横屏" : "竖屏";
+}

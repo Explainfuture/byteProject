@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { z } from "zod";
 import { modelCreativeAdapter, modelVideoUnderstandingAdapter, remotionStoryboardAdapter } from "@byteproject/adapters";
-import { analyzeSampleVideo, composePlan, createMockTranscript, segmentLongVideo } from "@byteproject/core";
+import { analyzeSampleVideo, composePlan, createBriefDrivenTranscript, segmentLongVideo } from "@byteproject/core";
 import { knowledgeStore } from "@byteproject/knowledge";
 import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, RunResult, SampleAnalysis, SourceInput, StructureSlot, VideoMetadata } from "@byteproject/shared";
 
@@ -80,14 +80,15 @@ type AgentTool = {
 
 export function normalizeSourceInput(body: unknown): SourceInput {
   const parsed = sourceInputSchema.parse(body);
+  const sampleVideoIds = parsed.sampleVideoIds?.length ? parsed.sampleVideoIds : ["sample-mock"];
   return {
-    sampleVideoIds: parsed.sampleVideoIds?.length ? parsed.sampleVideoIds : ["sample-mock"],
-    materialVideoId: parsed.materialVideoId || "material-mock",
+    sampleVideoIds,
+    materialVideoId: parsed.materialVideoId || sampleVideoIds[0],
     prompt: parsed.prompt || "把这段素材重构成一个高转化商品短视频",
-    productName: parsed.productName || "智能随行杯",
-    sellingPoints: parsed.sellingPoints?.length ? parsed.sellingPoints : ["一眼看见余量", "三种提醒模式", "轻巧不占包"],
-    targetAudience: parsed.targetAudience || "通勤和运动人群",
-    tone: parsed.tone || "清爽、有节奏、偏转化",
+    productName: parsed.productName || "未命名商品",
+    sellingPoints: parsed.sellingPoints?.length ? parsed.sellingPoints : ["根据目标描述提炼核心卖点", "用上传视频画面支撑表达", "素材不足处用包装补全"],
+    targetAudience: parsed.targetAudience || "目标用户",
+    tone: parsed.tone || "专业、清晰、有节奏",
     targetDurationSec: parsed.targetDurationSec || 18,
     auxiliaryAssetIds: parsed.auxiliaryAssetIds ?? [],
     strategy: parsed.strategy || "balanced"
@@ -117,7 +118,7 @@ export async function runStructureTransferAgent(input: {
       {
         role: "system",
         content:
-          "You are the orchestrator for a short-video structure-transfer agent. Use tools to inspect videos, analyze the sample, retrieve knowledge, segment material, compose the plan, and render preview. Do not answer from memory. Call tools until a preview has been rendered. Final answer must be short JSON with status and calledTools."
+          "You are the orchestrator for a short-video structure-transfer agent. Use tools to inspect the uploaded video, analyze key frames from the sample, retrieve knowledge, evaluate available visual segments, compose the plan, and render preview. Transfer creative method, not source content. Do not answer from memory. Call tools until a preview has been rendered. Final answer must be short JSON with status and calledTools."
       },
       {
         role: "user",
@@ -126,13 +127,13 @@ export async function runStructureTransferAgent(input: {
           source: input.source,
           availableVideos: {
             sample: publicVideo(input.sampleVideo),
-            material: publicVideo(input.materialVideo)
+            availableVisualSource: publicVideo(input.materialVideo)
           },
           requiredToolPath: [
             "inspect_uploaded_video",
             "analyze_sample_video",
             "retrieve_structure_knowledge",
-            "segment_material_video",
+            "evaluate_uploaded_video_segments",
             "compose_video_plan",
             "render_preview"
           ]
@@ -191,7 +192,7 @@ export async function runStructureTransferAgent(input: {
 const agentTools: AgentTool[] = [
   {
     name: "inspect_uploaded_video",
-    description: "Return sanitized metadata for the uploaded sample or material video.",
+    description: "Return sanitized metadata for the uploaded video. In single-video mode, the same upload is used for structure analysis and available visual assessment.",
     parameters: {
       type: "object",
       properties: {
@@ -253,8 +254,8 @@ const agentTools: AgentTool[] = [
     }
   },
   {
-    name: "segment_material_video",
-    description: "Segment and classify the new long material video into candidate segments.",
+    name: "evaluate_uploaded_video_segments",
+    description: "Segment and classify available frames or visual sections from the uploaded video into candidate segments for gap diagnosis.",
     parameters: {
       type: "object",
       properties: {
@@ -267,7 +268,7 @@ const agentTools: AgentTool[] = [
     async execute(input, context) {
       const parsed = z.object({ videoId: z.string(), prompt: z.string() }).parse(input);
       void parsed.videoId;
-      context.materialSegments = segmentLongVideo(context.materialVideo, parsed.prompt);
+      context.materialSegments = segmentLongVideo(context.materialVideo, parsed.prompt, context.source.targetDurationSec);
       return { video: publicVideo(context.materialVideo), segments: context.materialSegments };
     }
   },
@@ -286,7 +287,7 @@ const agentTools: AgentTool[] = [
       const parsed = z.object({ strategy: creativeStrategySchema.optional() }).parse(input);
       const sample = context.sample ?? (await analyzeSampleWithVision(context.sampleVideo, context.source)).analysis;
       const knowledge = context.knowledge ?? knowledgeStore.retrieve({ vertical: "marketing", prompt: context.source.prompt, limit: 3 });
-      const materialSegments = context.materialSegments ?? segmentLongVideo(context.materialVideo, context.source.prompt);
+      const materialSegments = context.materialSegments ?? segmentLongVideo(context.materialVideo, context.source.prompt, context.source.targetDurationSec);
       context.sample = sample;
       context.knowledge = knowledge;
       context.materialSegments = materialSegments;
@@ -373,7 +374,7 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
     });
   }
   context.knowledge = knowledgeStore.retrieve({ vertical: "marketing", prompt: context.source.prompt, limit: 3 });
-  context.materialSegments = segmentLongVideo(context.materialVideo, context.source.prompt);
+  context.materialSegments = segmentLongVideo(context.materialVideo, context.source.prompt, context.source.targetDurationSec);
   context.generated = composePlan({
     source: context.source,
     samples: [context.sample],
@@ -426,7 +427,7 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
 
 export async function analyzeSampleWithVision(
   video: VideoMetadata,
-  source: Pick<SourceInput, "prompt" | "productName" | "targetDurationSec">
+  source: Pick<SourceInput, "prompt" | "productName" | "sellingPoints" | "targetAudience" | "tone" | "targetDurationSec">
 ): Promise<{
   analysis: SampleAnalysis;
   model: Awaited<ReturnType<typeof modelVideoUnderstandingAdapter.run>>;
@@ -440,13 +441,19 @@ export async function analyzeSampleWithVision(
   });
 
   if (!model.analysis) {
+    const analysis = analyzeSampleVideo(video, createBriefDrivenTranscript(source, video));
     return {
-      analysis: analyzeSampleVideo(video, createMockTranscript(source.productName)),
+      analysis: {
+        ...analysis,
+        summary: fallbackAnalysisSummary(video, source, getFrameCount(video, model)),
+        rhythmPattern: fallbackRhythmPattern(video, source),
+        packagingPattern: ["基于 Brief 的标题条", "卖点卡片补全", "素材不足时使用结构重排 / 局部复用 / AIGC 补全"]
+      },
       model
     };
   }
 
-  const transcript = model.analysis.transcript?.length ? model.analysis.transcript : createMockTranscript(source.productName);
+  const transcript = model.analysis.transcript?.length ? model.analysis.transcript : createBriefDrivenTranscript(source, video);
   const analysis = analyzeSampleVideo(video, transcript);
   return {
     analysis: {
@@ -521,12 +528,12 @@ function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: Ag
     throw new Error("Agent context is incomplete.");
   }
   return {
-    mode: process.env.ENABLE_MOCK_GENERATION === "false" ? "real" : "mock",
+    mode: hasUploadedVideo(context.sampleVideo) ? "real" : "mock",
     source: context.source,
-    samples: [context.sample],
+    samples: [publicSampleAnalysis(context.sample)],
     knowledge: context.knowledge,
     material: {
-      video: context.materialVideo,
+      video: publicVideo(context.materialVideo),
       segments: context.materialSegments
     },
     generated: context.generated,
@@ -537,10 +544,12 @@ function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: Ag
 
 function addAnalysisRationale(context: AgentContext) {
   if (!context.generated) return;
+  const frameCount = getFrameCount(context.sampleVideo, context.sampleVision);
+  const uploadedBasis = frameCount > 0 ? `已接收上传视频并抽取 ${frameCount} 张关键帧` : "已接收上传视频元数据";
   context.generated.compositionPlan.rationale = [
     context.sampleVision?.analysis
       ? `已对样例视频抽取 ${context.sampleVision.frameCount ?? 0} 张关键帧，并完成真实视觉结构拆解。`
-      : `真实视觉拆解暂不可用：${publicModelFailureReason(context.sampleVision?.error)}，已使用本地结构规则完成样例分析。`,
+      : `${uploadedBasis}；${publicModelFailureReason(context.sampleVision?.error)}，当前基于抽帧、视频元数据、本地结构规则和你的 Brief 生成迁移方案。`,
     ...context.generated.compositionPlan.rationale
   ].slice(0, 5);
 }
@@ -636,7 +645,7 @@ function summarizeObservation(value: unknown): unknown {
   return value;
 }
 
-function publicVideo(video: VideoMetadata) {
+export function publicVideo(video: VideoMetadata): VideoMetadata {
   return {
     id: video.id,
     role: video.role,
@@ -645,7 +654,16 @@ function publicVideo(video: VideoMetadata) {
     width: video.width,
     height: video.height,
     fps: video.fps,
-    sizeBytes: video.sizeBytes
+    sizeBytes: video.sizeBytes,
+    coverUrl: video.coverUrl,
+    previewFrameCount: video.previewFrameCount ?? video.previewFrameDataUrls?.length
+  };
+}
+
+export function publicSampleAnalysis(sample: SampleAnalysis): SampleAnalysis {
+  return {
+    ...sample,
+    video: publicVideo(sample.video)
   };
 }
 
@@ -660,7 +678,7 @@ export function safeModelStatus(model: Awaited<ReturnType<typeof modelVideoUnder
 }
 
 function publicFallbackReason(reason: string) {
-  if (/401|api key|authentication|bearer/i.test(reason)) return "在线工具调用鉴权失败";
+  if (/401|api key|authentication|bearer|credential|not configured/i.test(reason)) return "在线工具调用鉴权失败";
   if (/endpoint/i.test(reason)) return "在线模型 endpoint 配置不可用";
   if (/fetch failed|network|ENOTFOUND|ECONN/i.test(reason)) return "在线模型网络请求失败";
   if (/ark/i.test(reason)) return "在线工具调用暂不可用";
@@ -669,7 +687,8 @@ function publicFallbackReason(reason: string) {
 
 function publicModelFailureReason(error: string | undefined) {
   if (!error) return "在线模型未返回有效视觉结果";
-  if (/401|api key|authentication|bearer/i.test(error)) return "在线模型鉴权失败，请检查 ARK_API_KEY";
+  if (/401|api key|authentication|bearer/i.test(error)) return "在线模型鉴权失败，已切换本地结构规则";
+  if (/credential|not configured|replace_me/i.test(error)) return "在线模型凭证未配置，已切换本地结构规则";
   if (/endpoint/i.test(error)) return "在线模型 endpoint 配置不可用";
   if (/fetch failed|network|ENOTFOUND|ECONN/i.test(error)) return "在线模型网络请求失败";
   if (/No frames|spawn|ffmpeg|frame/i.test(error)) return "视频关键帧抽取失败";
@@ -682,4 +701,25 @@ function normalizeBaseUrl(value: string) {
 
 export function resolveOutputDir(value?: string) {
   return resolve(value ?? process.env.OUTPUT_DIR ?? "data/outputs");
+}
+
+function getFrameCount(video: VideoMetadata, model?: Awaited<ReturnType<typeof modelVideoUnderstandingAdapter.run>>) {
+  return model?.frameCount ?? video.previewFrameDataUrls?.length ?? 0;
+}
+
+function fallbackAnalysisSummary(
+  video: VideoMetadata,
+  source: Pick<SourceInput, "prompt" | "productName" | "sellingPoints" | "targetAudience">,
+  frameCount: number
+) {
+  const basis = frameCount > 0 ? `已接收上传视频并抽取 ${frameCount} 张关键帧` : "已接收上传视频元数据";
+  return `${basis}；在线视觉模型不可用，当前按「${source.productName}」和你的目标 Brief 生成可迁移结构草案。`;
+}
+
+function fallbackRhythmPattern(video: VideoMetadata, source: Pick<SourceInput, "targetDurationSec">) {
+  return `按上传视频 ${Math.round(video.durationSec)} 秒素材建立 ${source.targetDurationSec || 18} 秒目标节奏，优先迁移开头、卖点推进和收口方法。`;
+}
+
+function hasUploadedVideo(video: VideoMetadata) {
+  return Boolean(video.localPath || video.previewFrameDataUrls?.length || video.sizeBytes > 0);
 }

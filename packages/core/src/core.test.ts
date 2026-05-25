@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runMockPipeline } from "./index";
+import type { SourceInput, VideoMetadata } from "@byteproject/shared";
+import { analyzeSampleVideo, createBriefDrivenTranscript, matchSlots, runMockPipeline, segmentLongVideo } from "./index";
 
 describe("mock P0 pipeline", () => {
   it("generates structure, gaps, composition plan, and timeline", () => {
@@ -13,5 +14,65 @@ describe("mock P0 pipeline", () => {
     expect(result.generated.timeline.length).toBe(result.samples[0].slots.length);
     expect(result.generated.demo.status).toBe("mock_ready");
   });
-});
 
+  it("builds uploaded-video fallback analysis from the user brief instead of default mock copy", () => {
+    const source: Partial<SourceInput> = {
+      prompt: "把横屏科技展示视频迁移成新品发布短视频方案",
+      productName: "横屏演示装置",
+      sellingPoints: ["空间感强", "产品亮相明确", "适合发布会开场"],
+      targetAudience: "科技新品观众",
+      tone: "专业、清晰、有节奏",
+      targetDurationSec: 18
+    };
+    const video: VideoMetadata = {
+      id: "sample-landscape",
+      role: "sample",
+      fileName: "landscape-fixture.webm",
+      durationSec: 18,
+      width: 1280,
+      height: 720,
+      fps: 24,
+      sizeBytes: 1024
+    };
+
+    const transcript = createBriefDrivenTranscript(source, video);
+    const analysis = analyzeSampleVideo(video, transcript, { persist: false });
+    const output = JSON.stringify({ transcript, analysis });
+
+    expect(output).toContain("横屏演示装置");
+    expect(output).toContain("空间感强");
+    expect(output).not.toContain("智能随行杯");
+    expect(output).not.toContain("出门总是忘记喝水吗");
+  });
+
+  it("adapts material segmentation and gap confidence to the actual uploaded video duration", () => {
+    const prompt = "生成一个参赛演示短视频";
+    const targetDurationSec = 18;
+    const baseVideo: VideoMetadata = {
+      id: "sample-dynamic-duration",
+      role: "sample",
+      fileName: "dynamic.mp4",
+      durationSec: 18,
+      width: 1280,
+      height: 720,
+      fps: 24,
+      sizeBytes: 1024
+    };
+
+    const shortSegments = segmentLongVideo({ ...baseVideo, durationSec: 4.1 }, prompt, targetDurationSec);
+    const mediumSegments = segmentLongVideo({ ...baseVideo, durationSec: 12 }, prompt, targetDurationSec);
+    const longSegments = segmentLongVideo({ ...baseVideo, durationSec: 60 }, prompt, targetDurationSec);
+
+    expect(shortSegments.at(-1)?.endSec).toBeLessThanOrEqual(4.1);
+    expect(mediumSegments.at(-1)?.endSec).toBeLessThanOrEqual(12);
+    expect(longSegments.at(-1)?.endSec).toBeLessThanOrEqual(60);
+    expect(shortSegments.length).toBeLessThan(longSegments.length);
+
+    const sample = analyzeSampleVideo(baseVideo, createBriefDrivenTranscript({ productName: "参赛 Agent", targetDurationSec }, baseVideo), { persist: false });
+    const shortMatches = matchSlots(sample.slots, shortSegments);
+    const longMatches = matchSlots(sample.slots, longSegments);
+
+    expect(shortMatches.some((match) => match.status !== "matched")).toBe(true);
+    expect(longMatches.some((match) => match.status === "matched")).toBe(true);
+  });
+});

@@ -40,6 +40,7 @@ export type VideoMetadata = {
   coverUrl?: string;
   localPath?: string;
   previewFrameDataUrls?: string[];
+  previewFrameCount?: number;
 };
 
 export type TranscriptLine = {

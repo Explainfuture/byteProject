@@ -16,15 +16,15 @@ type FakeVideoProps = {
 };
 
 const baseFont =
-  '"Aptos", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif';
+  '"Inter", "Geist", "SF Pro Text", "SF Pro Display", "Alibaba PuHuiTi", "HarmonyOS Sans SC", "Source Han Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif';
 
 const variantCopy = {
   click: {
     eyebrow: "高点击版",
     hook: "通勤路上总忘喝水？",
     hookSub: "这个小提醒，比你想象中更懂你",
-    tone: "#14b8a6",
-    accent: "#f59e0b",
+    tone: "#51406f",
+    accent: "#c58a3a",
     cta: "先收藏，对照清单再选",
     closing: "3 秒看懂随行杯怎么挑"
   },
@@ -32,8 +32,8 @@ const variantCopy = {
     eyebrow: "高转化版",
     hook: "一只杯子，解决三件小事",
     hookSub: "看余量、提醒喝水、轻松带走",
-    tone: "#22c55e",
-    accent: "#14b8a6",
+    tone: "#3d2f55",
+    accent: "#b47a2b",
     cta: "现在收藏，按需选择",
     closing: "适合通勤 / 健身 / 出行"
   }
@@ -277,7 +277,7 @@ function useSpring(fromFrame: number, duration: number) {
 function canvasStyle(tone: string): CSSProperties {
   return {
     overflow: "hidden",
-    background: `linear-gradient(180deg, #0b1220 0%, #111827 58%, ${tone} 150%)`,
+    background: `linear-gradient(180deg, #1d1c19 0%, #2a2925 58%, ${tone} 150%)`,
     color: "#fff",
     fontFamily: baseFont
   };
@@ -304,8 +304,8 @@ const badgeStyle: CSSProperties = {
   borderRadius: 999,
   padding: "12px 20px",
   fontSize: 30,
-  fontWeight: 800,
-  letterSpacing: "0.02em"
+  fontWeight: 600,
+  letterSpacing: "0.04em"
 };
 
 const headlineStyle: CSSProperties = {
@@ -313,7 +313,7 @@ const headlineStyle: CSSProperties = {
   margin: "34px 0 0",
   fontSize: 106,
   lineHeight: 1.02,
-  fontWeight: 900,
+  fontWeight: 650,
   letterSpacing: 0
 };
 
@@ -321,7 +321,7 @@ const titleStyle: CSSProperties = {
   margin: "28px 0 0",
   fontSize: 82,
   lineHeight: 1.08,
-  fontWeight: 900,
+  fontWeight: 650,
   letterSpacing: 0
 };
 
@@ -344,7 +344,7 @@ const questionMarkStyle: CSSProperties = {
   borderRadius: 54,
   background: "rgba(255,255,255,0.12)",
   fontSize: 132,
-  fontWeight: 900
+  fontWeight: 650
 };
 
 const productLayoutStyle: CSSProperties = {
@@ -370,7 +370,7 @@ const pointListStyle: CSSProperties = {
   listStyle: "none",
   fontSize: 38,
   lineHeight: 1.25,
-  fontWeight: 800
+  fontWeight: 600
 };
 
 const cupWrapStyle: CSSProperties = {
@@ -449,7 +449,7 @@ const beforeAfterStyle: CSSProperties = {
   padding: 38,
   borderRadius: 52,
   fontSize: 42,
-  fontWeight: 900
+  fontWeight: 650
 };
 
 const captionBarStyle: CSSProperties = {
@@ -459,7 +459,7 @@ const captionBarStyle: CSSProperties = {
   background: "rgba(255,255,255,0.12)",
   color: "rgba(255,255,255,0.82)",
   fontSize: 34,
-  fontWeight: 700
+  fontWeight: 600
 };
 
 const ctaCardStyle: CSSProperties = {
@@ -470,7 +470,7 @@ const ctaCardStyle: CSSProperties = {
   padding: 54,
   borderRadius: 56,
   background: "#fff",
-  color: "#111827",
+  color: "#171717",
   boxShadow: "0 40px 90px rgba(0,0,0,0.32)"
 };
 

@@ -12,6 +12,8 @@ import type { VideoMetadata } from "@byteproject/shared";
 import {
   analyzeSampleWithVision,
   normalizeSourceInput,
+  publicSampleAnalysis,
+  publicVideo,
   safeModelStatus,
   runStructureTransferAgent,
   uploadedFileSchema,
@@ -74,8 +76,9 @@ app.post("/api/upload/:role", upload.single("video"), async (request, response, 
       sizeBytes: file.size
     });
     metadata.previewFrameDataUrls = parsePreviewFrames(request.body.previewFrames);
+    metadata.previewFrameCount = metadata.previewFrameDataUrls?.length;
     uploadedVideos.set(metadata.id, metadata);
-    response.json({ video: metadata });
+    response.json({ video: publicVideo(metadata) });
   } catch (error) {
     next(error);
   }
@@ -87,7 +90,7 @@ app.post("/api/analyze/sample", async (request, response, next) => {
     const video = getVideoOrMock(source.sampleVideoIds[0], "sample");
     const analysisResult = await analyzeSampleWithVision(video, source);
     response.json({
-      analysis: analysisResult.analysis,
+      analysis: publicSampleAnalysis(analysisResult.analysis),
       model: safeModelStatus(analysisResult.model),
       knowledge: knowledgeStore.list()
     });
@@ -100,7 +103,10 @@ app.post("/api/generate", async (request, response, next) => {
   try {
     const source = normalizeSourceInput(request.body);
     const sampleVideo = getVideoOrMock(source.sampleVideoIds[0], "sample");
-    const materialVideo = getVideoOrMock(source.materialVideoId, "material");
+    const materialVideo =
+      source.materialVideoId === source.sampleVideoIds[0]
+        ? { ...sampleVideo, role: "material" as const }
+        : getVideoOrMock(source.materialVideoId, "material");
     const result = await runStructureTransferAgent({
       source,
       sampleVideo,
@@ -136,7 +142,7 @@ function getVideoOrMock(id: string | undefined, role: "sample" | "material"): Vi
   return {
     id: id || `${role}-mock`,
     role,
-    fileName: role === "sample" ? "爆款样例.mp4" : "评测长视频素材.mp4",
+    fileName: role === "sample" ? "上传视频.mp4" : "上传视频候选画面.mp4",
     durationSec: role === "sample" ? 18 : 48,
     width: 1080,
     height: 1920,
