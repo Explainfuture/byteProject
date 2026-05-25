@@ -10,12 +10,16 @@ await page.goto("http://localhost:5173", { waitUntil: "networkidle" });
 
 const title = await page.locator("h1").innerText();
 const slotCount = await page.locator(".slot-node").count();
-const timelineCount = await page.locator(".timeline-block").count();
+const structureTabCount = await page.getByRole("tab", { name: "结构迁移" }).count();
 
-await page.getByRole("button", { name: /生成新视频方案/ }).click();
-await page.waitForResponse((response) => response.url().includes("/api/generate") && response.status() === 200);
+await Promise.all([
+  page.waitForResponse((response) => response.url().includes("/api/generate") && response.status() === 200),
+  page.getByRole("button", { name: "生成新视频方案" }).click()
+]);
 await page.waitForLoadState("networkidle");
+await page.locator(".timeline-block").first().waitFor({ state: "visible" });
 
+const timelineCount = await page.locator(".timeline-block").count();
 const previewLinkCount = await page.locator(".preview-link").count();
 const screenshotPath = resolve("data/tmp/ui-verification.png");
 await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -24,6 +28,7 @@ await browser.close();
 const result = {
   title,
   slotCount,
+  structureTabCount,
   timelineCount,
   previewLinkCount,
   screenshotPath
@@ -31,4 +36,3 @@ const result = {
 
 await writeFile(resolve("data/tmp/ui-verification.json"), JSON.stringify(result, null, 2), "utf8");
 console.log(JSON.stringify(result));
-
