@@ -1,7 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import type { GeneratedPlan, TimelineItem, VideoMetadata } from "@byteproject/shared";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { join, resolve } from "node:path";
+import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, SampleAnalysis, SourceInput, TimelineItem, VideoMetadata } from "@byteproject/shared";
+
+const require = createRequire(import.meta.url);
+const bundledFfmpegPath = require("ffmpeg-static") as string | null;
+const bundledFfprobePath = (require("ffprobe-static") as { path?: string }).path;
 
 export type ToolProtocol<I, O> = {
   name: string;
@@ -26,7 +31,7 @@ export const videoAnalyzerAdapter: ToolProtocol<
   timeoutMs: 15_000,
   fallback: "Use deterministic mock metadata when ffprobe is unavailable.",
   async run(input) {
-    const ffprobe = process.env.FFPROBE_PATH || "ffprobe";
+    const ffprobe = resolveFfprobePath();
     try {
       const raw = await execJson(ffprobe, [
         "-v",
@@ -92,6 +97,207 @@ export const remotionStoryboardAdapter: ToolProtocol<
   }
 };
 
+export type ModelVideoUnderstandingInput = {
+  video: VideoMetadata;
+  role: "sample" | "material";
+  prompt: string;
+  productName?: string;
+  targetDurationSec?: number;
+};
+
+export type ModelVideoUnderstanding = {
+  summary?: string;
+  transcript?: Array<{ startSec: number; endSec: number; text: string }>;
+  slots?: Array<{
+    segment?: "hook" | "body" | "proof" | "offer" | "cta";
+    intent?: string;
+    durationSec?: number;
+    rhythmHint?: "fast" | "medium" | "slow";
+    packagingHints?: string[];
+  }>;
+  rhythmPattern?: string;
+  packagingPattern?: string[];
+  shotCount?: number;
+  visualNotes?: string[];
+};
+
+type VideoStructureSlotInsight = NonNullable<ModelVideoUnderstanding["slots"]>[number];
+
+export const modelVideoUnderstandingAdapter: ToolProtocol<
+  ModelVideoUnderstandingInput,
+  { provider: "ark" | "mock"; model?: string; analysis?: ModelVideoUnderstanding; frameCount?: number; error?: string }
+> = {
+  name: "Ark Doubao Multimodal Video Understanding Adapter",
+  inputSchema: "{ video, role, prompt, productName?, targetDurationSec? }",
+  outputSchema: "{ provider, model, analysis?, frameCount?, error? }",
+  requiredEnv: ["ARK_BASE_URL", "ARK_API_KEY", "ARK_ENDPOINT_ID", "FFMPEG_PATH"],
+  filePermissions: ["UPLOAD_DIR", "TMP_DIR"],
+  timeoutMs: 90_000,
+  fallback: "Use deterministic rule-based sample analysis when video understanding is unavailable.",
+  async run(input) {
+    if (process.env.ENABLE_VISION_ANALYSIS === "false") {
+      return { provider: "mock", error: "ENABLE_VISION_ANALYSIS is false." };
+    }
+
+    if ((process.env.LLM_PROVIDER ?? "ark") !== "ark") {
+      return { provider: "mock", error: "LLM_PROVIDER is not ark." };
+    }
+
+    const apiKey = process.env.ARK_API_KEY;
+    const model = process.env.ARK_ENDPOINT_ID || process.env.ARK_MODEL;
+    if (!apiKey || apiKey === "replace_me" || !model || model === "replace_me") {
+      return { provider: "mock", error: "Ark credentials are not configured." };
+    }
+
+    if (!input.video.localPath) {
+      return { provider: "mock", model, error: "Video localPath is missing; cannot sample visual frames." };
+    }
+
+    const sampled = await sampleVideoFrames(input.video.localPath, input.video.id);
+    if (!sampled.frames.length) {
+      return { provider: "ark", model, error: sampled.error ?? "No frames were extracted from the uploaded video." };
+    }
+
+    try {
+      const baseUrl = normalizeBaseUrl(process.env.ARK_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3");
+      const response = await fetchWithTimeout(
+        `${baseUrl}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model,
+            messages: buildVideoUnderstandingMessages(input, sampled.frames),
+            temperature: 0.2,
+            max_tokens: 1800
+          })
+        },
+        90_000
+      );
+
+      if (!response.ok) {
+        return { provider: "ark", model, frameCount: sampled.frames.length, error: `Ark vision request failed with ${response.status}: ${await safeResponseText(response)}` };
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) return { provider: "ark", model, frameCount: sampled.frames.length, error: "Ark vision response did not include message content." };
+
+      return {
+        provider: "ark",
+        model,
+        frameCount: sampled.frames.length,
+        analysis: normalizeVideoUnderstanding(parseJsonObject(content))
+      };
+    } catch (error) {
+      return {
+        provider: "ark",
+        model,
+        frameCount: sampled.frames.length,
+        error: error instanceof Error ? error.message : "Unknown Ark vision adapter error."
+      };
+    }
+  }
+};
+
+export type ModelEnhancementInput = {
+  source: SourceInput;
+  sample: SampleAnalysis;
+  knowledge: KnowledgeEntry[];
+  materialSegments: MaterialSegment[];
+  plan: GeneratedPlan;
+};
+
+export type ModelEnhancement = {
+  script?: string;
+  timeline?: Array<{
+    id?: string;
+    slotId?: string;
+    caption?: string;
+    packaging?: string[];
+    transition?: string;
+    beatHint?: string;
+  }>;
+  storyboard?: Array<{
+    slotId?: string;
+    title?: string;
+    visual?: string;
+    caption?: string;
+    reason?: string;
+  }>;
+  packagingSuggestions?: string[];
+  rationale?: string[];
+};
+
+export const modelCreativeAdapter: ToolProtocol<
+  ModelEnhancementInput,
+  { provider: "ark" | "mock"; model?: string; enhancement?: ModelEnhancement; error?: string }
+> = {
+  name: "Ark Doubao Creative Model Adapter",
+  inputSchema: "{ source, sample, knowledge, materialSegments, plan }",
+  outputSchema: "{ provider, model, enhancement?, error? }",
+  requiredEnv: ["ARK_BASE_URL", "ARK_API_KEY", "ARK_ENDPOINT_ID"],
+  filePermissions: [],
+  timeoutMs: 75_000,
+  fallback: "Return no enhancement and keep deterministic rule-based plan.",
+  async run(input) {
+    if ((process.env.LLM_PROVIDER ?? "ark") !== "ark") {
+      return { provider: "mock", error: "LLM_PROVIDER is not ark." };
+    }
+
+    const apiKey = process.env.ARK_API_KEY;
+    const model = process.env.ARK_ENDPOINT_ID || process.env.ARK_MODEL;
+    if (!apiKey || apiKey === "replace_me" || !model || model === "replace_me") {
+      return { provider: "mock", error: "Ark credentials are not configured." };
+    }
+
+    try {
+      const baseUrl = normalizeBaseUrl(process.env.ARK_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3");
+      const response = await fetchWithTimeout(
+        `${baseUrl}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model,
+            messages: buildCreativeMessages(input),
+            temperature: 0.45,
+            max_tokens: 1800
+          })
+        },
+        75_000
+      );
+
+      if (!response.ok) {
+        return { provider: "ark", model, error: `Ark request failed with ${response.status}: ${await safeResponseText(response)}` };
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) return { provider: "ark", model, error: "Ark response did not include message content." };
+
+      const enhancement = normalizeEnhancement(parseJsonObject(content));
+      return { provider: "ark", model, enhancement };
+    } catch (error) {
+      return {
+        provider: "ark",
+        model,
+        error: error instanceof Error ? error.message : "Unknown Ark adapter error."
+      };
+    }
+  }
+};
+
 function renderTimelineHtml(timeline: TimelineItem[], script: string) {
   const blocks = timeline
     .map(
@@ -126,6 +332,262 @@ function renderTimelineHtml(timeline: TimelineItem[], script: string) {
   <main>${blocks}<pre>${escapeHtml(script)}</pre></main>
 </body>
 </html>`;
+}
+
+function buildCreativeMessages(input: ModelEnhancementInput) {
+  const source = input.source;
+  const slots = input.sample.slots.map((slot) => ({
+    id: slot.id,
+    segment: slot.segment,
+    intent: slot.intent,
+    requiredAssetTypes: slot.requiredAssetTypes,
+    rhythmHint: slot.rhythmHint,
+    packagingHints: slot.packagingHints
+  }));
+  const matches = input.plan.compositionPlan.slotMatches.map((match) => ({
+    slotId: match.slotId,
+    status: match.status,
+    reason: match.reason,
+    gapPlan: match.gapPlan
+  }));
+  const currentTimeline = input.plan.timeline.map((item) => ({
+    id: item.id,
+    slotId: item.slotId,
+    startSec: item.startSec,
+    endSec: item.endSec,
+    caption: item.caption,
+    packaging: item.packaging,
+    transition: item.transition,
+    beatHint: item.beatHint
+  }));
+  const knowledge = input.knowledge.flatMap((entry) => entry.atoms).slice(0, 8).map((atom) => ({
+    id: atom.id,
+    kind: atom.kind,
+    name: atom.name,
+    intent: atom.intent,
+    outputHint: atom.outputHint
+  }));
+
+  return [
+    {
+      role: "system",
+      content:
+        "你是短视频结构迁移引擎的创意编排模块。只迁移样例结构和剪辑方法，禁止复制样例具体画面、人物、品牌、音频、字幕原文。必须输出严格 JSON，不要 Markdown，不要解释。"
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        task:
+          "基于样例结构、新素材槽位匹配和知识原子，增强新视频方案。保持 timeline 的 id/slotId/startSec/endSec 不变，只改 caption、packaging、transition、beatHint、script、rationale。不要输出 storyboard。",
+        outputSchema: {
+          script: "string，中文，按段落输出，每段以【Hook/展开/证明/卖点/CTA】开头",
+          timeline: [
+            {
+              id: "必须使用输入 timeline 的 id",
+              slotId: "必须使用输入 timeline 的 slotId",
+              caption: "短字幕，不超过 22 个中文字符",
+              packaging: ["1-3 个包装建议"],
+              transition: "转场建议",
+              beatHint: "节奏/BGM 卡点建议"
+            }
+          ],
+          packagingSuggestions: ["3-5 条包装建议"],
+          rationale: ["3 条以内，说明如何迁移结构、如何补缺口"]
+        },
+        source,
+        sampleSummary: input.sample.summary,
+        slots,
+        slotMatches: matches,
+        currentTimeline,
+        materialSegments: input.materialSegments,
+        knowledgeAtoms: knowledge
+      })
+    }
+  ];
+}
+
+function buildVideoUnderstandingMessages(input: ModelVideoUnderstandingInput, frames: string[]) {
+  return [
+    {
+      role: "system",
+      content:
+        "你是短视频结构拆解助手。只分析用户上传视频的画面结构、镜头节奏、字幕包装和可能的口播/字幕内容，不复制原视频具体内容。必须输出严格 JSON，不要 Markdown，不要解释。"
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            task:
+              input.role === "sample"
+                ? "根据这些从样例视频抽取的关键帧，拆解爆款短视频结构。输出脚本段落、Hook/Body/Proof/Offer/CTA 槽位、节奏、包装、字幕/语音概览。"
+                : "根据这些从用户素材视频抽取的关键帧，识别可用于重构短视频的素材类型、画面内容和缺口。",
+            video: {
+              fileName: input.video.fileName,
+              durationSec: input.video.durationSec,
+              width: input.video.width,
+              height: input.video.height,
+              fps: input.video.fps
+            },
+            userGoal: input.prompt,
+            productName: input.productName,
+            targetDurationSec: input.targetDurationSec,
+            outputSchema: {
+              summary: "string，概括视频真实画面和结构，不超过80字",
+              transcript: [{ startSec: "number", endSec: "number", text: "从字幕/画面文字/可推断口播得到的短句" }],
+              slots: [
+                {
+                  segment: "hook | body | proof | offer | cta",
+                  intent: "该段结构意图",
+                  durationSec: "number",
+                  rhythmHint: "fast | medium | slow",
+                  packagingHints: ["字幕/标题条/贴纸/转场/封面等包装观察"]
+                }
+              ],
+              rhythmPattern: "string",
+              packagingPattern: ["string"],
+              shotCount: "number",
+              visualNotes: ["string"]
+            }
+          })
+        },
+        ...frames.map((frame) => ({
+          type: "image_url",
+          image_url: {
+            url: `data:image/jpeg;base64,${frame}`,
+            detail: "low"
+          }
+        }))
+      ]
+    }
+  ];
+}
+
+async function sampleVideoFrames(filePath: string, videoId: string) {
+  const ffmpeg = resolveFfmpegPath();
+  const frameCount = Number(process.env.VISION_FRAME_COUNT ?? 6);
+  const tmpRoot = resolve(process.env.TMP_DIR ?? "data/tmp");
+  const outputDir = join(tmpRoot, `vision-${videoId}-${Date.now()}`);
+  await mkdir(outputDir, { recursive: true });
+
+  try {
+    await execJson(ffmpeg, [
+      "-y",
+      "-i",
+      filePath,
+      "-vf",
+      `fps=1/3,scale='min(480,iw)':-2`,
+      "-frames:v",
+      String(frameCount),
+      "-q:v",
+      "4",
+      join(outputDir, "frame-%02d.jpg")
+    ]);
+    const frameFiles = (await readdir(outputDir)).filter((file) => file.endsWith(".jpg")).sort().slice(0, frameCount);
+    const frames = await Promise.all(frameFiles.map(async (file) => (await readFile(join(outputDir, file))).toString("base64")));
+    return { frames };
+  } catch (error) {
+    return { frames: [], error: error instanceof Error ? error.message : "Failed to extract video frames." };
+  }
+}
+
+function resolveFfmpegPath() {
+  return process.env.FFMPEG_PATH || bundledFfmpegPath || "ffmpeg";
+}
+
+function resolveFfprobePath() {
+  return process.env.FFPROBE_PATH || bundledFfprobePath || "ffprobe";
+}
+
+function normalizeVideoUnderstanding(value: unknown): ModelVideoUnderstanding {
+  if (!value || typeof value !== "object") return {};
+  const candidate = value as ModelVideoUnderstanding;
+  return {
+    summary: typeof candidate.summary === "string" ? candidate.summary : undefined,
+    transcript: cleanTranscript(candidate.transcript),
+    slots: cleanSlots(candidate.slots),
+    rhythmPattern: typeof candidate.rhythmPattern === "string" ? candidate.rhythmPattern : undefined,
+    packagingPattern: cleanStringList(candidate.packagingPattern),
+    shotCount: typeof candidate.shotCount === "number" && Number.isFinite(candidate.shotCount) ? Math.max(1, Math.round(candidate.shotCount)) : undefined,
+    visualNotes: cleanStringList(candidate.visualNotes)
+  };
+}
+
+function cleanTranscript(value: unknown) {
+  if (!Array.isArray(value)) return undefined;
+  const lines = value
+    .map((item) => {
+      if (!item || typeof item !== "object") return undefined;
+      const candidate = item as { startSec?: unknown; endSec?: unknown; text?: unknown };
+      if (typeof candidate.text !== "string" || !candidate.text.trim()) return undefined;
+      return {
+        startSec: typeof candidate.startSec === "number" ? candidate.startSec : 0,
+        endSec: typeof candidate.endSec === "number" ? candidate.endSec : 0,
+        text: candidate.text.trim()
+      };
+    })
+    .filter((item): item is { startSec: number; endSec: number; text: string } => Boolean(item));
+  return lines.length ? lines.slice(0, 12) : undefined;
+}
+
+function cleanSlots(value: unknown) {
+  if (!Array.isArray(value)) return undefined;
+  const allowedSegments = new Set(["hook", "body", "proof", "offer", "cta"]);
+  const allowedRhythm = new Set(["fast", "medium", "slow"]);
+  const slots: VideoStructureSlotInsight[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const candidate = item as Record<string, unknown>;
+    const segment = typeof candidate.segment === "string" && allowedSegments.has(candidate.segment) ? candidate.segment : undefined;
+    const rhythmHint = typeof candidate.rhythmHint === "string" && allowedRhythm.has(candidate.rhythmHint) ? candidate.rhythmHint : undefined;
+    slots.push({
+      segment: segment as VideoStructureSlotInsight["segment"],
+      intent: typeof candidate.intent === "string" ? candidate.intent : undefined,
+      durationSec: typeof candidate.durationSec === "number" && Number.isFinite(candidate.durationSec) ? candidate.durationSec : undefined,
+      rhythmHint: rhythmHint as VideoStructureSlotInsight["rhythmHint"],
+      packagingHints: cleanStringList(candidate.packagingHints)
+    });
+  }
+  return slots.length ? slots.slice(0, 8) : undefined;
+}
+
+function normalizeBaseUrl(value: string) {
+  return value.replace(/\/+$/, "");
+}
+
+function parseJsonObject(content: string) {
+  const trimmed = content.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "");
+  return JSON.parse(trimmed) as unknown;
+}
+
+function normalizeEnhancement(value: unknown): ModelEnhancement {
+  if (!value || typeof value !== "object") return {};
+  const candidate = value as ModelEnhancement;
+  return {
+    script: typeof candidate.script === "string" ? candidate.script : undefined,
+    timeline: Array.isArray(candidate.timeline) ? candidate.timeline : undefined,
+    storyboard: Array.isArray(candidate.storyboard) ? candidate.storyboard : undefined,
+    packagingSuggestions: cleanStringList(candidate.packagingSuggestions),
+    rationale: cleanStringList(candidate.rationale)
+  };
+}
+
+function cleanStringList(value: unknown) {
+  if (!Array.isArray(value)) return undefined;
+  const items = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
+  return items.length ? items.slice(0, 8) : undefined;
+}
+
+function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timeout));
+}
+
+async function safeResponseText(response: Response) {
+  const text = await response.text();
+  return text.slice(0, 500);
 }
 
 function execJson(command: string, args: string[]) {
@@ -165,4 +627,3 @@ function escapeHtml(value: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 }
-

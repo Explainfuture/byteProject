@@ -10,11 +10,13 @@
   },
   "dependencies": {
     "@byteproject/shared": "0.1.0",
+    "@remotion/player": "^4.0.465",
     "@vitejs/plugin-react": "^4.2.1",
     "lucide-react": "^0.468.0",
-    "vite": "^5.2.11",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "remotion": "^4.0.465",
+    "vite": "^5.2.11"
   },
   "devDependencies": {
     "@types/react": "^18.2.66",
@@ -22,4 +24,3 @@
     "typescript": "^5.4.5"
   }
 }
-

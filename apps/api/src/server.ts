@@ -1,13 +1,25 @@
-import "dotenv/config";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import cors from "cors";
+import dotenv from "dotenv";
 import express from "express";
 import multer from "multer";
-import { remotionStoryboardAdapter, videoAnalyzerAdapter } from "@byteproject/adapters";
-import { analyzeSampleVideo, composePlan, createMockTranscript, runMockPipeline, segmentLongVideo } from "@byteproject/core";
+import { ZodError } from "zod";
+import { videoAnalyzerAdapter } from "@byteproject/adapters";
+import { runMockPipeline } from "@byteproject/core";
 import { knowledgeStore } from "@byteproject/knowledge";
-import type { SourceInput, VideoMetadata } from "@byteproject/shared";
+import type { VideoMetadata } from "@byteproject/shared";
+import {
+  analyzeSampleWithVision,
+  normalizeSourceInput,
+  safeModelStatus,
+  runStructureTransferAgent,
+  uploadedFileSchema,
+  uploadRoleSchema
+} from "./structureAgent";
+
+dotenv.config({ path: resolve(process.cwd(), "../../.env") });
+dotenv.config();
 
 const app = express();
 const port = Number(process.env.API_PORT ?? 8787);
@@ -34,7 +46,8 @@ app.get("/api/health", (_request, response) => {
   response.json({
     ok: true,
     mode: process.env.ENABLE_MOCK_GENERATION === "false" ? "real" : "mock-ready",
-    adapters: ["ffmpeg", "model", "knowledge", "remotion-preview"]
+    orchestration: process.env.ENABLE_AGENT_TOOL_CALLING === "false" ? "deterministic" : "agent-tool-calling",
+    adapters: ["ffmpeg", "vision-model", "model", "knowledge", "remotion-preview"]
   });
 });
 
@@ -48,16 +61,17 @@ app.get("/api/knowledge", (_request, response) => {
 
 app.post("/api/upload/:role", upload.single("video"), async (request, response, next) => {
   try {
-    const role = request.params.role === "sample" ? "sample" : "material";
+    const role = uploadRoleSchema.parse(request.params.role);
     if (!request.file) {
       response.status(400).json({ error: "Missing video file." });
       return;
     }
+    const file = uploadedFileSchema.parse(request.file);
     const metadata = await videoAnalyzerAdapter.run({
       role,
-      fileName: request.file.originalname,
-      filePath: request.file.path,
-      sizeBytes: request.file.size
+      fileName: file.originalname,
+      filePath: file.path,
+      sizeBytes: file.size
     });
     uploadedVideos.set(metadata.id, metadata);
     response.json({ video: metadata });
@@ -66,11 +80,19 @@ app.post("/api/upload/:role", upload.single("video"), async (request, response, 
   }
 });
 
-app.post("/api/analyze/sample", async (request, response) => {
-  const video = getVideoOrMock(request.body.videoId, "sample");
-  const transcript = Array.isArray(request.body.transcript) ? request.body.transcript : createMockTranscript(request.body.productName);
-  const analysis = analyzeSampleVideo(video, transcript);
-  response.json({ analysis, knowledge: knowledgeStore.list() });
+app.post("/api/analyze/sample", async (request, response, next) => {
+  try {
+    const source = normalizeSourceInput(request.body);
+    const video = getVideoOrMock(source.sampleVideoIds[0], "sample");
+    const analysisResult = await analyzeSampleWithVision(video, source);
+    response.json({
+      analysis: analysisResult.analysis,
+      model: safeModelStatus(analysisResult.model),
+      knowledge: knowledgeStore.list()
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post("/api/generate", async (request, response, next) => {
@@ -78,28 +100,13 @@ app.post("/api/generate", async (request, response, next) => {
     const source = normalizeSourceInput(request.body);
     const sampleVideo = getVideoOrMock(source.sampleVideoIds[0], "sample");
     const materialVideo = getVideoOrMock(source.materialVideoId, "material");
-    const sample = analyzeSampleVideo(sampleVideo, createMockTranscript(source.productName));
-    const knowledge = knowledgeStore.retrieve({ vertical: "marketing", prompt: source.prompt, limit: 3 });
-    const segments = segmentLongVideo(materialVideo, source.prompt);
-    const generated = composePlan({ source, samples: [sample], knowledge, materialSegments: segments });
-    const preview = await remotionStoryboardAdapter.run({ plan: generated, outputDir });
-    generated.demo = {
-      status: "rendered",
-      url: preview.url,
-      note: "已生成低保真 HTML 视频分镜预览；后续可替换为 Remotion MP4 渲染。"
-    };
-
-    response.json({
-      mode: process.env.ENABLE_MOCK_GENERATION === "false" ? "real" : "mock",
+    const result = await runStructureTransferAgent({
       source,
-      samples: [sample],
-      knowledge,
-      material: {
-        video: materialVideo,
-        segments
-      },
-      generated
+      sampleVideo,
+      materialVideo,
+      outputDir
     });
+    response.json(result);
   } catch (error) {
     next(error);
   }
@@ -107,6 +114,13 @@ app.post("/api/generate", async (request, response, next) => {
 
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
   console.error(error);
+  if (error instanceof ZodError) {
+    response.status(400).json({
+      error: "Invalid request payload.",
+      issues: error.issues.map((issue) => ({ path: issue.path, message: issue.message }))
+    });
+    return;
+  }
   response.status(500).json({
     error: error instanceof Error ? error.message : "Unknown server error"
   });
@@ -129,19 +143,3 @@ function getVideoOrMock(id: string | undefined, role: "sample" | "material"): Vi
     sizeBytes: 0
   };
 }
-
-function normalizeSourceInput(body: Partial<SourceInput>): SourceInput {
-  return {
-    sampleVideoIds: body.sampleVideoIds?.length ? body.sampleVideoIds : ["sample-mock"],
-    materialVideoId: body.materialVideoId || "material-mock",
-    prompt: body.prompt || "把这段素材重构成一个高转化商品短视频",
-    productName: body.productName || "智能随行杯",
-    sellingPoints: body.sellingPoints?.length ? body.sellingPoints : ["一眼看见余量", "三种提醒模式", "轻巧不占包"],
-    targetAudience: body.targetAudience || "通勤和运动人群",
-    tone: body.tone || "清晰、有节奏、偏转化",
-    targetDurationSec: body.targetDurationSec || 18,
-    auxiliaryAssetIds: body.auxiliaryAssetIds ?? [],
-    strategy: body.strategy || "balanced"
-  };
-}
-
