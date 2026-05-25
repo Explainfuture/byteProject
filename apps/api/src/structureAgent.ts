@@ -364,6 +364,14 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
   const sampleResult = await analyzeSampleWithVision(context.sampleVideo, context.source);
   context.sample = sampleResult.analysis;
   context.sampleVision = sampleResult.model;
+  if (!sampleResult.model.analysis && sampleResult.model.error) {
+    trace.push({
+      tool: "vision_model",
+      ok: false,
+      input: { videoId: context.sampleVideo.id },
+      observation: safeModelStatus(sampleResult.model)
+    });
+  }
   context.knowledge = knowledgeStore.retrieve({ vertical: "marketing", prompt: context.source.prompt, limit: 3 });
   context.materialSegments = segmentLongVideo(context.materialVideo, context.source.prompt);
   context.generated = composePlan({
@@ -380,6 +388,18 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
     plan: context.generated
   });
   applyModelEnhancement(context.generated, modelResult.enhancement);
+  if (!modelResult.enhancement && modelResult.error) {
+    trace.push({
+      tool: "creative_model",
+      ok: false,
+      input: { planId: context.generated.id },
+      observation: {
+        provider: modelResult.provider,
+        status: "fallback",
+        error: publicModelFailureReason(modelResult.error)
+      }
+    });
+  }
   context.generated.compositionPlan.rationale = [
     `Agent 工具调用暂未完成，已切换到确定性编排：${publicFallbackReason(reason)}`,
     ...context.generated.compositionPlan.rationale
@@ -520,7 +540,7 @@ function addAnalysisRationale(context: AgentContext) {
   context.generated.compositionPlan.rationale = [
     context.sampleVision?.analysis
       ? `已对样例视频抽取 ${context.sampleVision.frameCount ?? 0} 张关键帧，并完成真实视觉结构拆解。`
-      : "真实视觉拆解暂不可用，已使用本地结构规则完成样例分析。",
+      : `真实视觉拆解暂不可用：${publicModelFailureReason(context.sampleVision?.error)}，已使用本地结构规则完成样例分析。`,
     ...context.generated.compositionPlan.rationale
   ].slice(0, 5);
 }
@@ -634,13 +654,26 @@ export function safeModelStatus(model: Awaited<ReturnType<typeof modelVideoUnder
     provider: model.provider,
     usedVision: Boolean(model.analysis),
     frameCount: model.frameCount ?? 0,
-    status: model.analysis ? "ok" : "fallback"
+    status: model.analysis ? "ok" : "fallback",
+    error: model.analysis ? undefined : publicModelFailureReason(model.error)
   };
 }
 
 function publicFallbackReason(reason: string) {
-  if (/401|api key|authentication|endpoint|ark|bearer/i.test(reason)) return "在线工具调用暂不可用";
+  if (/401|api key|authentication|bearer/i.test(reason)) return "在线工具调用鉴权失败";
+  if (/endpoint/i.test(reason)) return "在线模型 endpoint 配置不可用";
+  if (/fetch failed|network|ENOTFOUND|ECONN/i.test(reason)) return "在线模型网络请求失败";
+  if (/ark/i.test(reason)) return "在线工具调用暂不可用";
   return reason.slice(0, 120);
+}
+
+function publicModelFailureReason(error: string | undefined) {
+  if (!error) return "在线模型未返回有效视觉结果";
+  if (/401|api key|authentication|bearer/i.test(error)) return "在线模型鉴权失败，请检查 ARK_API_KEY";
+  if (/endpoint/i.test(error)) return "在线模型 endpoint 配置不可用";
+  if (/fetch failed|network|ENOTFOUND|ECONN/i.test(error)) return "在线模型网络请求失败";
+  if (/No frames|spawn|ffmpeg|frame/i.test(error)) return "视频关键帧抽取失败";
+  return "在线模型暂不可用";
 }
 
 function normalizeBaseUrl(value: string) {

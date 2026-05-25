@@ -19,6 +19,7 @@ await page.goto("http://localhost:5173", { waitUntil: "networkidle" });
 const startTitle = await page.getByRole("heading", { name: "爆款结构迁移引擎" }).innerText();
 const uploadActionCount = await page.locator(".upload-action").count();
 const promptCount = await page.locator("#targetPrompt").count();
+const startButtonInitiallyDisabled = await page.getByRole("button", { name: "开始结构迁移" }).isDisabled();
 
 await Promise.all([
   page.waitForResponse((response) => response.url().includes("/api/upload/sample") && response.status() === 200),
@@ -69,6 +70,7 @@ const result = {
   startTitle,
   uploadActionCount,
   promptCount,
+  startButtonInitiallyDisabled,
   uploadedSample: sampleVideoPath,
   uploadedMaterial: materialVideoPath,
   modelEnhanced,

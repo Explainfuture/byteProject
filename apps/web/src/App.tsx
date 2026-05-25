@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowRight,
   CheckCircle2,
-  ChevronDown,
   Clapperboard,
   Download,
   FileVideo2,
@@ -12,6 +11,7 @@ import {
   Loader2,
   MessageSquareText,
   PackageCheck,
+  PlayCircle,
   RefreshCcw,
   Send,
   Sparkles,
@@ -32,6 +32,7 @@ import {
 type UploadRole = "sample" | "material";
 type AppScreen = "start" | "progress" | "result";
 type ResultTab = "demo" | "structure" | "gaps" | "timeline" | "packaging" | "versions";
+type UploadedVideo = { id: string; name: string; previewUrl: string; posterUrl?: string };
 
 type AppForm = {
   prompt: string;
@@ -41,6 +42,12 @@ type AppForm = {
   tone: string;
   targetDurationSec: number;
   strategy: CreativeStrategy;
+  hookStyle: string;
+  aspectRatio: string;
+  subtitleStyle: string;
+  rhythm: string;
+  ctaStyle: string;
+  visualStyle: string;
 };
 
 const strategies: Array<{ value: CreativeStrategy; label: string; hint: string }> = [
@@ -62,6 +69,13 @@ const resultTabs: Array<{ value: ResultTab; label: string; icon: ReactNode }> = 
 
 const progressSteps = ["提取字幕与语音", "拆解 Hook / Body / CTA", "分析镜头节奏", "匹配新素材", "识别素材缺口", "生成新视频草案"];
 
+const hookStyleOptions = ["痛点提问", "结果前置", "反差开场", "场景代入"];
+const aspectRatioOptions = ["9:16 竖屏", "1:1 方屏", "16:9 横屏"];
+const subtitleStyleOptions = ["大字重点字幕", "口播逐字字幕", "卖点卡片字幕", "少字幕更干净"];
+const rhythmOptions = ["跟随样例节奏", "更快切", "更稳重", "前 3 秒加速"];
+const ctaStyleOptions = ["强转化收口", "轻提示收口", "福利引导", "评论互动"];
+const visualStyleOptions = ["清爽产品感", "生活方式感", "科技质感", "促销信息流"];
+
 const defaultForm: AppForm = {
   prompt: "把这段素材重构成一个高转化商品短视频，保留样例的开头节奏和卖点推进方式。",
   productName: "智能随行杯",
@@ -69,7 +83,13 @@ const defaultForm: AppForm = {
   targetAudience: "通勤和运动人群",
   tone: "清爽、有节奏、偏转化",
   targetDurationSec: 18,
-  strategy: "balanced"
+  strategy: "balanced",
+  hookStyle: "痛点提问",
+  aspectRatio: "9:16 竖屏",
+  subtitleStyle: "大字重点字幕",
+  rhythm: "跟随样例节奏",
+  ctaStyle: "强转化收口",
+  visualStyle: "清爽产品感"
 };
 
 export function App() {
@@ -79,8 +99,8 @@ export function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [progressIndex, setProgressIndex] = useState(0);
-  const [sampleVideoId, setSampleVideoId] = useState<string | null>(null);
-  const [materialVideoId, setMaterialVideoId] = useState<string | null>(null);
+  const [sampleVideo, setSampleVideo] = useState<UploadedVideo | null>(null);
+  const [materialVideo, setMaterialVideo] = useState<UploadedVideo | null>(null);
   const [revisionPrompt, setRevisionPrompt] = useState("");
   const [form, setForm] = useState<AppForm>(defaultForm);
   const [, startTransition] = useTransition();
@@ -101,6 +121,19 @@ export function App() {
   const slots = result?.samples[0]?.slots ?? [];
   const matches = result?.generated.compositionPlan.slotMatches ?? [];
   const totalDuration = result?.generated.timeline.at(-1)?.endSec ?? form.targetDurationSec;
+  const hasUploadedInputs = Boolean(sampleVideo?.id && materialVideo?.id);
+
+  useEffect(() => {
+    return () => {
+      if (sampleVideo?.previewUrl) URL.revokeObjectURL(sampleVideo.previewUrl);
+    };
+  }, [sampleVideo?.previewUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (materialVideo?.previewUrl) URL.revokeObjectURL(materialVideo.previewUrl);
+    };
+  }, [materialVideo?.previewUrl]);
 
   async function loadDemo() {
     setIsLoading(true);
@@ -117,13 +150,30 @@ export function App() {
   async function uploadVideo(file: File, role: UploadRole) {
     const body = new FormData();
     body.append("video", file);
+    const previewFrames = await extractVideoFrameDataUrls(file);
+    if (previewFrames.length) body.append("previewFrames", JSON.stringify(previewFrames));
     const response = await fetch(`/api/upload/${role}`, {
       method: "POST",
       body
     });
     const data = (await response.json()) as { video: { id: string; fileName: string } };
-    if (role === "sample") setSampleVideoId(data.video.id);
-    else setMaterialVideoId(data.video.id);
+    const uploaded = {
+      id: data.video.id,
+      name: data.video.fileName || file.name,
+      previewUrl: URL.createObjectURL(file),
+      posterUrl: previewFrames[Math.min(2, previewFrames.length - 1)]
+    };
+    if (role === "sample") {
+      setSampleVideo((previous) => {
+        if (previous?.previewUrl) URL.revokeObjectURL(previous.previewUrl);
+        return uploaded;
+      });
+    } else {
+      setMaterialVideo((previous) => {
+        if (previous?.previewUrl) URL.revokeObjectURL(previous.previewUrl);
+        return uploaded;
+      });
+    }
   }
 
   async function generate(extraInstruction?: string) {
@@ -132,10 +182,19 @@ export function App() {
     setScreen("progress");
     setProgressIndex(0);
 
-    const finalPrompt = extraInstruction ? `${form.prompt}\n\n改片指令：${extraInstruction}` : form.prompt;
+    const settingPrompt = [
+      `开头方式：${form.hookStyle}`,
+      `画幅：${form.aspectRatio}`,
+      `字幕：${form.subtitleStyle}`,
+      `节奏：${form.rhythm}`,
+      `收口：${form.ctaStyle}`,
+      `视觉风格：${form.visualStyle}`
+    ].join("\n");
+    const basePrompt = `${form.prompt}\n\n视频期望参数：\n${settingPrompt}`;
+    const finalPrompt = extraInstruction ? `${basePrompt}\n\n改片指令：${extraInstruction}` : basePrompt;
     const payload = {
-      sampleVideoIds: [sampleVideoId ?? result.samples[0]?.video.id ?? "sample-mock"],
-      materialVideoId: materialVideoId ?? result.material.video.id ?? "material-mock",
+      sampleVideoIds: [sampleVideo?.id ?? "sample-mock"],
+      materialVideoId: materialVideo?.id ?? "material-mock",
       prompt: finalPrompt,
       productName: form.productName,
       sellingPoints: form.sellingPoints.split("\n").map((item) => item.trim()).filter(Boolean),
@@ -190,8 +249,9 @@ export function App() {
         <StartScreen
           form={form}
           setForm={setForm}
-          sampleVideoId={sampleVideoId ?? result.samples[0]?.video.id}
-          materialVideoId={materialVideoId ?? result.material.video.id}
+          sampleVideo={sampleVideo}
+          materialVideo={materialVideo}
+          canGenerate={hasUploadedInputs && Boolean(form.prompt.trim())}
           onUpload={uploadVideo}
           onGenerate={() => generate()}
           isGenerating={isGenerating}
@@ -206,6 +266,8 @@ export function App() {
           activeTab={activeTab}
           setActiveTab={setActiveTab}
           totalDuration={totalDuration}
+          sampleVideo={sampleVideo}
+          materialVideo={materialVideo}
           slots={slots}
           matches={matches}
           revisionPrompt={revisionPrompt}
@@ -223,8 +285,9 @@ export function App() {
 function StartScreen(props: {
   form: AppForm;
   setForm: (form: AppForm) => void;
-  sampleVideoId?: string;
-  materialVideoId?: string;
+  sampleVideo: UploadedVideo | null;
+  materialVideo: UploadedVideo | null;
+  canGenerate: boolean;
   onUpload: (file: File, role: UploadRole) => Promise<void>;
   onGenerate: () => void;
   isGenerating: boolean;
@@ -238,96 +301,207 @@ function StartScreen(props: {
           <p>上传一个爆款样例，输入你的新素材或主题，AI 会拆解它的结构，并生成新的短视频方案。</p>
         </div>
 
-        <div className="start-actions" aria-label="核心输入">
-          <UploadAction role="sample" label="上传样例视频" activeId={props.sampleVideoId} onFile={props.onUpload} />
-          <UploadAction role="material" label="上传新素材 / 长视频" activeId={props.materialVideoId} onFile={props.onUpload} />
-          <label className="prompt-box" htmlFor="targetPrompt">
-            <span>目标描述</span>
-            <textarea
-              id="targetPrompt"
-              name="targetPrompt"
-              autoComplete="off"
-              placeholder="输入你想生成什么视频……"
-              value={props.form.prompt}
-              onChange={(event) => props.setForm({ ...props.form, prompt: event.target.value })}
-            />
-          </label>
+        <div className="workflow-rail" aria-label="创作流程">
+          <WorkflowStep index={1} label="上传样例" state={props.sampleVideo ? "done" : "active"} />
+          <WorkflowStep index={2} label="AI 拆解结构" state={props.sampleVideo ? "active" : "idle"} />
+          <WorkflowStep index={3} label="上传素材" state={props.materialVideo ? "done" : "idle"} />
+          <WorkflowStep index={4} label="生成方案" state={props.canGenerate ? "active" : "idle"} />
         </div>
 
-        <AdvancedSettings form={props.form} setForm={props.setForm} />
+        <div className="launch-panel">
+          <div>
+            <span>Ready to create</span>
+            <strong>{props.canGenerate ? "样例和素材已就绪" : "先完成两个视频上传"}</strong>
+            <p>{props.canGenerate ? "AI 将迁移样例的节奏、卖点推进和收口方式。" : "上传后即可一键生成短视频结构迁移方案。"}</p>
+          </div>
+          <button type="button" className="start-button" aria-label="开始结构迁移" onClick={props.onGenerate} disabled={props.isGenerating || !props.canGenerate}>
+            {props.isGenerating ? <Loader2 className="spin" size={20} aria-hidden="true" /> : <Wand2 size={20} aria-hidden="true" />}
+            AI 一键迁移结构
+          </button>
+        </div>
 
-        <button type="button" className="start-button" onClick={props.onGenerate} disabled={props.isGenerating}>
-          {props.isGenerating ? <Loader2 className="spin" size={19} aria-hidden="true" /> : <Wand2 size={19} aria-hidden="true" />}
-          开始结构迁移
-        </button>
+        <div className="start-workspace">
+          <section className="upload-panel" aria-label="上传视频">
+            <div className="section-heading">
+              <span>上传视频</span>
+              <strong>样例与新素材</strong>
+            </div>
+            <div className="upload-list">
+              <UploadAction role="sample" label="上传样例视频" video={props.sampleVideo} onFile={props.onUpload} />
+              <UploadAction role="material" label="上传新素材 / 长视频" video={props.materialVideo} onFile={props.onUpload} />
+            </div>
+            <div className="video-preview-grid">
+              <VideoPreview
+                title="样例预览"
+                video={props.sampleVideo}
+                emptyText="上传爆款样例后在这里预览"
+                hints={["支持 MP4 / MOV，建议 10-60 秒", "AI 会识别开头钩子、节奏、字幕、卖点结构"]}
+              />
+              <VideoPreview
+                title="素材预览"
+                video={props.materialVideo}
+                emptyText="上传新素材后在这里预览"
+                hints={["可上传长视频或素材合集", "AI 会匹配可用镜头并标记素材缺口"]}
+              />
+            </div>
+          </section>
+
+          <section className="settings-panel" aria-label="视频期望参数设置">
+            <div className="section-heading">
+              <span>设置</span>
+              <strong>视频期望参数</strong>
+            </div>
+            <SettingsPanel form={props.form} setForm={props.setForm} />
+          </section>
+        </div>
+        {!props.canGenerate ? <p className="start-warning">请先上传样例视频和新素材视频；未上传时只会走演示/规则兜底，不会进行真实视频理解。</p> : null}
       </div>
     </section>
   );
 }
 
-function AdvancedSettings(props: { form: AppForm; setForm: (form: AppForm) => void }) {
-  const { form, setForm } = props;
+function WorkflowStep(props: { index: number; label: string; state: "done" | "active" | "idle" }) {
   return (
-    <details className="advanced-settings">
-      <summary>
-        <span>高级设置</span>
-        <ChevronDown size={16} aria-hidden="true" />
-      </summary>
-      <div className="advanced-grid">
-        <label className="field" htmlFor="productName">
-          <span>商品名</span>
-          <input
-            id="productName"
-            name="productName"
-            autoComplete="off"
-            value={form.productName}
-            onChange={(event) => setForm({ ...form, productName: event.target.value })}
-          />
-        </label>
-        <label className="field" htmlFor="targetDurationSec">
-          <span>目标时长</span>
-          <input
-            id="targetDurationSec"
-            name="targetDurationSec"
-            type="number"
-            inputMode="numeric"
-            min={10}
-            max={24}
-            autoComplete="off"
-            value={form.targetDurationSec}
-            onChange={(event) => setForm({ ...form, targetDurationSec: Number(event.target.value) })}
-          />
-        </label>
-        <label className="field wide" htmlFor="sellingPoints">
-          <span>卖点顺序</span>
-          <textarea
-            id="sellingPoints"
-            name="sellingPoints"
-            autoComplete="off"
-            value={form.sellingPoints}
-            onChange={(event) => setForm({ ...form, sellingPoints: event.target.value })}
-          />
-        </label>
-        <label className="field" htmlFor="targetAudience">
-          <span>目标人群</span>
-          <input
-            id="targetAudience"
-            name="targetAudience"
-            autoComplete="off"
-            value={form.targetAudience}
-            onChange={(event) => setForm({ ...form, targetAudience: event.target.value })}
-          />
-        </label>
-        <label className="field" htmlFor="tone">
-          <span>包装语气</span>
-          <input id="tone" name="tone" autoComplete="off" value={form.tone} onChange={(event) => setForm({ ...form, tone: event.target.value })} />
-        </label>
-      </div>
-    </details>
+    <div className={`workflow-step ${props.state}`}>
+      <span>{props.state === "done" ? <CheckCircle2 size={16} aria-hidden="true" /> : props.index}</span>
+      <strong>{props.label}</strong>
+    </div>
   );
 }
 
-function UploadAction(props: { role: UploadRole; label: string; activeId?: string; onFile: (file: File, role: UploadRole) => Promise<void> }) {
+function SettingsPanel(props: { form: AppForm; setForm: (form: AppForm) => void }) {
+  const { form, setForm } = props;
+  return (
+    <div className="settings-stack">
+      <SettingsGroup title="内容目标">
+        <label className="field wide compact" htmlFor="targetPrompt">
+          <span>目标描述</span>
+          <textarea
+            id="targetPrompt"
+            name="targetPrompt"
+            autoComplete="off"
+            placeholder="输入你想生成什么视频……"
+            value={form.prompt}
+            onChange={(event) => setForm({ ...form, prompt: event.target.value })}
+          />
+        </label>
+      </SettingsGroup>
+
+      <SettingsGroup title="商品信息">
+        <div className="settings-grid">
+          <label className="field" htmlFor="productName">
+            <span>商品名</span>
+            <input
+              id="productName"
+              name="productName"
+              autoComplete="off"
+              value={form.productName}
+              onChange={(event) => setForm({ ...form, productName: event.target.value })}
+            />
+          </label>
+          <label className="field" htmlFor="targetDurationSec">
+            <span>目标时长</span>
+            <input
+              id="targetDurationSec"
+              name="targetDurationSec"
+              type="number"
+              inputMode="numeric"
+              min={10}
+              max={60}
+              autoComplete="off"
+              value={form.targetDurationSec}
+              onChange={(event) => setForm({ ...form, targetDurationSec: Number(event.target.value) })}
+            />
+          </label>
+          <label className="field" htmlFor="targetAudience">
+            <span>目标人群</span>
+            <input
+              id="targetAudience"
+              name="targetAudience"
+              autoComplete="off"
+              value={form.targetAudience}
+              onChange={(event) => setForm({ ...form, targetAudience: event.target.value })}
+            />
+          </label>
+          <label className="field" htmlFor="tone">
+            <span>包装语气</span>
+            <input id="tone" name="tone" autoComplete="off" value={form.tone} onChange={(event) => setForm({ ...form, tone: event.target.value })} />
+          </label>
+          <label className="field wide compact" htmlFor="sellingPoints">
+            <span>卖点顺序</span>
+            <textarea
+              id="sellingPoints"
+              name="sellingPoints"
+              autoComplete="off"
+              value={form.sellingPoints}
+              onChange={(event) => setForm({ ...form, sellingPoints: event.target.value })}
+            />
+          </label>
+        </div>
+      </SettingsGroup>
+
+      <SettingsGroup title="视频风格">
+        <OptionChips label="开头方式" value={form.hookStyle} options={hookStyleOptions} onChange={(value) => setForm({ ...form, hookStyle: value })} />
+        <OptionChips label="画幅" value={form.aspectRatio} options={aspectRatioOptions} onChange={(value) => setForm({ ...form, aspectRatio: value })} />
+        <OptionChips label="字幕样式" value={form.subtitleStyle} options={subtitleStyleOptions} onChange={(value) => setForm({ ...form, subtitleStyle: value })} />
+        <OptionChips label="节奏偏好" value={form.rhythm} options={rhythmOptions} onChange={(value) => setForm({ ...form, rhythm: value })} />
+        <OptionChips label="收口方式" value={form.ctaStyle} options={ctaStyleOptions} onChange={(value) => setForm({ ...form, ctaStyle: value })} />
+        <OptionChips label="视觉风格" value={form.visualStyle} options={visualStyleOptions} onChange={(value) => setForm({ ...form, visualStyle: value })} />
+      </SettingsGroup>
+
+      <SettingsGroup title="生成策略">
+        <div className="strategy-cards" role="radiogroup" aria-label="生成策略">
+          {strategies.map((item) => (
+            <button
+              key={item.value}
+              type="button"
+              className={form.strategy === item.value ? "active" : ""}
+              role="radio"
+              aria-checked={form.strategy === item.value}
+              onClick={() => setForm({ ...form, strategy: item.value })}
+            >
+              <strong>{item.label}</strong>
+              <span>{item.hint}</span>
+            </button>
+          ))}
+        </div>
+      </SettingsGroup>
+    </div>
+  );
+}
+
+function SettingsGroup(props: { title: string; children: ReactNode }) {
+  return (
+    <section className="settings-group">
+      <h2>{props.title}</h2>
+      {props.children}
+    </section>
+  );
+}
+
+function OptionChips(props: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
+  return (
+    <div className="option-row">
+      <span>{props.label}</span>
+      <div className="option-chips" role="radiogroup" aria-label={props.label}>
+        {props.options.map((option) => (
+          <button
+            key={option}
+            type="button"
+            className={props.value === option ? "active" : ""}
+            role="radio"
+            aria-checked={props.value === option}
+            onClick={() => props.onChange(option)}
+          >
+            {option}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function UploadAction(props: { role: UploadRole; label: string; video: UploadedVideo | null; onFile: (file: File, role: UploadRole) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const inputId = `${props.role}-video`;
   return (
@@ -348,9 +522,34 @@ function UploadAction(props: { role: UploadRole; label: string; activeId?: strin
       <span className="upload-action-icon">{busy ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Upload size={18} aria-hidden="true" />}</span>
       <span>
         <strong>{props.label}</strong>
-        <small>{busy ? "上传分析中…" : props.activeId ?? "未上传时使用演示素材"}</small>
+        <small>{busy ? "上传分析中…" : props.video?.name ?? "未上传：不会发送真实视频给模型"}</small>
       </span>
     </label>
+  );
+}
+
+function VideoPreview(props: { title: string; video: UploadedVideo | null; emptyText: string; hints: string[] }) {
+  return (
+    <article className={`video-preview ${props.video ? "has-video" : ""}`}>
+      <div className="preview-title">
+        <FileVideo2 size={16} aria-hidden="true" />
+        <span>{props.title}</span>
+      </div>
+      {props.video ? (
+        <video src={props.video.previewUrl} poster={props.video.posterUrl} controls muted playsInline preload="metadata" aria-label={`${props.title}：${props.video.name}`} />
+      ) : (
+        <div className="preview-empty">
+          <PlayCircle size={26} aria-hidden="true" />
+          <strong>{props.emptyText}</strong>
+          <ul>
+            {props.hints.map((hint) => (
+              <li key={hint}>{hint}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {props.video ? <p>{props.video.name}</p> : null}
+    </article>
   );
 }
 
@@ -384,6 +583,8 @@ function ResultWorkspace(props: {
   activeTab: ResultTab;
   setActiveTab: (tab: ResultTab) => void;
   totalDuration: number;
+  sampleVideo: UploadedVideo | null;
+  materialVideo: UploadedVideo | null;
   slots: StructureSlot[];
   matches: SlotMatch[];
   revisionPrompt: string;
@@ -423,7 +624,9 @@ function ResultWorkspace(props: {
         </nav>
 
         <main className="result-stage">
-          {props.activeTab === "demo" ? <DemoPanel result={props.result} totalDuration={props.totalDuration} setActiveTab={props.setActiveTab} /> : null}
+          {props.activeTab === "demo" ? (
+            <DemoPanel result={props.result} totalDuration={props.totalDuration} sampleVideo={props.sampleVideo} materialVideo={props.materialVideo} setActiveTab={props.setActiveTab} />
+          ) : null}
           {props.activeTab === "structure" ? <StructureMapping result={props.result} matches={props.matches} /> : null}
           {props.activeTab === "gaps" ? <GapDiagnosis slots={props.slots} matches={props.matches} /> : null}
           {props.activeTab === "timeline" ? <TimelineEditor items={props.result.generated.timeline} /> : null}
@@ -432,7 +635,7 @@ function ResultWorkspace(props: {
         </main>
 
         <aside className="preview-aside">
-          <PhonePreview result={props.result} />
+          <PhonePreview result={props.result} materialVideo={props.materialVideo} />
         </aside>
       </div>
 
@@ -446,7 +649,7 @@ function ResultWorkspace(props: {
   );
 }
 
-function DemoPanel(props: { result: RunResult; totalDuration: number; setActiveTab: (tab: ResultTab) => void }) {
+function DemoPanel(props: { result: RunResult; totalDuration: number; sampleVideo: UploadedVideo | null; materialVideo: UploadedVideo | null; setActiveTab: (tab: ResultTab) => void }) {
   const structureLine = publicRationale(props.result.generated.compositionPlan.rationale[0]) ?? "已根据样例结构生成新的短视频草案。";
   const fakeCases: Array<{ variant: FakeVideoVariant; title: string; note: string }> = [
     { variant: "click", title: "高点击版成片", note: "强 Hook + 快节奏字幕包装" },
@@ -463,39 +666,46 @@ function DemoPanel(props: { result: RunResult; totalDuration: number; setActiveT
       <div className="demo-video">
         <div className="demo-video-head">
           <span>{props.totalDuration}s</span>
-          <strong>Remotion 成片预览</strong>
+          <strong>{props.sampleVideo || props.materialVideo ? "真实上传视频回放" : "Remotion 成片预览"}</strong>
         </div>
-        <div className="remotion-grid">
-          {fakeCases.map((item) => (
-            <article key={item.variant} className="remotion-card">
-              <header>
-                <strong>{item.title}</strong>
-                <span>{item.note}</span>
-              </header>
-              <div className="fake-remotion-player">
-                <Player
-                  component={MarketingFakeVideo}
-                  durationInFrames={REMOTION_FAKE_VIDEO_FRAMES}
-                  fps={REMOTION_FAKE_VIDEO_FPS}
-                  compositionWidth={REMOTION_FAKE_VIDEO_WIDTH}
-                  compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
-                  inputProps={{ ...playerProps, variant: item.variant }}
-                  controls
-                  loop
-                  initialFrame={36}
-                  initiallyMuted
-                  showVolumeControls={false}
-                  style={{ width: "100%" }}
-                />
-              </div>
-            </article>
-          ))}
-        </div>
+        {props.sampleVideo || props.materialVideo ? (
+          <div className="source-video-grid">
+            {props.sampleVideo ? <SourceVideoCard title="样例视频" note="AI 已从这段视频迁移结构、节奏和包装方式" video={props.sampleVideo} /> : null}
+            {props.materialVideo ? <SourceVideoCard title="新素材视频" note="AI 用这段素材匹配镜头槽位并补齐缺口" video={props.materialVideo} /> : null}
+          </div>
+        ) : (
+          <div className="remotion-grid">
+            {fakeCases.map((item) => (
+              <article key={item.variant} className="remotion-card">
+                <header>
+                  <strong>{item.title}</strong>
+                  <span>{item.note}</span>
+                </header>
+                <div className="fake-remotion-player">
+                  <Player
+                    component={MarketingFakeVideo}
+                    durationInFrames={REMOTION_FAKE_VIDEO_FRAMES}
+                    fps={REMOTION_FAKE_VIDEO_FPS}
+                    compositionWidth={REMOTION_FAKE_VIDEO_WIDTH}
+                    compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
+                    inputProps={{ ...playerProps, variant: item.variant }}
+                    controls
+                    loop
+                    initialFrame={36}
+                    initiallyMuted
+                    showVolumeControls={false}
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
       </div>
       <div className="demo-explain">
         <h2 id="demo-title">已生成 {props.totalDuration} 秒商品短视频草案</h2>
         <p>{structureLine}</p>
-        <p>这里的两个预览由 Remotion Player 实时渲染，用于展示“结构迁移后的视频观感”，不是旧版 HTML 分镜占位。</p>
+        <p>{props.sampleVideo || props.materialVideo ? "左侧回放的是你刚上传的真实样例和素材；右侧方案来自模型拆解后的结构迁移结果。" : "这里的两个预览由 Remotion Player 实时渲染，用于展示“结构迁移后的视频观感”，不是旧版 HTML 分镜占位。"}</p>
         <div className="demo-buttons">
           <button type="button" onClick={() => props.setActiveTab("structure")}>
             <Layers3 size={16} aria-hidden="true" />
@@ -512,6 +722,19 @@ function DemoPanel(props: { result: RunResult; totalDuration: number; setActiveT
         </div>
       </div>
     </section>
+  );
+}
+
+function SourceVideoCard(props: { title: string; note: string; video: UploadedVideo }) {
+  return (
+    <article className="source-video-card">
+      <header>
+        <strong>{props.title}</strong>
+        <span>{props.note}</span>
+      </header>
+      <video className="source-video-player" src={props.video.previewUrl} poster={props.video.posterUrl} controls muted playsInline preload="metadata" aria-label={`${props.title}：${props.video.name}`} />
+      <p>{props.video.name}</p>
+    </article>
   );
 }
 
@@ -655,30 +878,36 @@ function VersionCards(props: { activeStrategy: CreativeStrategy }) {
   );
 }
 
-function PhonePreview(props: { result: RunResult }) {
+function PhonePreview(props: { result: RunResult; materialVideo: UploadedVideo | null }) {
   return (
     <section className="phone-preview" aria-label="手机预览">
-      <div className="phone-remotion-player">
-        <Player
-          component={MarketingFakeVideo}
-          durationInFrames={REMOTION_FAKE_VIDEO_FRAMES}
-          fps={REMOTION_FAKE_VIDEO_FPS}
-          compositionWidth={REMOTION_FAKE_VIDEO_WIDTH}
-          compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
-          inputProps={{
-            variant: "conversion",
-            productName: props.result.source.productName,
-            points: props.result.source.sellingPoints,
-            audience: props.result.source.targetAudience
-          }}
-          loop
-          autoPlay
-          initialFrame={36}
-          initiallyMuted
-          style={{ width: "100%" }}
-        />
-      </div>
-      <p>右侧为 Remotion 竖屏预览；后续可接入服务端 MP4 渲染。</p>
+      {props.materialVideo ? (
+        <div className="phone-uploaded-player">
+          <video src={props.materialVideo.previewUrl} poster={props.materialVideo.posterUrl} controls muted playsInline preload="metadata" aria-label={`手机预览：${props.materialVideo.name}`} />
+        </div>
+      ) : (
+        <div className="phone-remotion-player">
+          <Player
+            component={MarketingFakeVideo}
+            durationInFrames={REMOTION_FAKE_VIDEO_FRAMES}
+            fps={REMOTION_FAKE_VIDEO_FPS}
+            compositionWidth={REMOTION_FAKE_VIDEO_WIDTH}
+            compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
+            inputProps={{
+              variant: "conversion",
+              productName: props.result.source.productName,
+              points: props.result.source.sellingPoints,
+              audience: props.result.source.targetAudience
+            }}
+            loop
+            autoPlay
+            initialFrame={36}
+            initiallyMuted
+            style={{ width: "100%" }}
+          />
+        </div>
+      )}
+      <p>{props.materialVideo ? "右侧回放你上传的新素材；生成方案已按样例结构匹配这段素材。" : "右侧为 Remotion 竖屏预览；后续可接入服务端 MP4 渲染。"}</p>
     </section>
   );
 }
@@ -745,6 +974,67 @@ function publicRationale(value?: string) {
 
 function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+async function extractVideoFrameDataUrls(file: File) {
+  const video = document.createElement("video");
+  const objectUrl = URL.createObjectURL(file);
+  video.preload = "metadata";
+  video.muted = true;
+  video.playsInline = true;
+  video.src = objectUrl;
+
+  try {
+    await waitForVideoEvent(video, "loadedmetadata");
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 18;
+    const frameCount = 6;
+    const width = Math.max(1, video.videoWidth || 480);
+    const height = Math.max(1, video.videoHeight || 854);
+    const scale = Math.min(480 / width, 1);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return [];
+
+    const frames: string[] = [];
+    for (let index = 0; index < frameCount; index += 1) {
+      const time = Math.min(duration - 0.1, Math.max(0, (duration * (index + 0.5)) / frameCount));
+      video.currentTime = time;
+      await waitForVideoEvent(video, "seeked");
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      frames.push(canvas.toDataURL("image/jpeg", 0.74));
+    }
+    return frames;
+  } catch {
+    return [];
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+function waitForVideoEvent(video: HTMLVideoElement, eventName: "loadedmetadata" | "seeked") {
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for ${eventName}`));
+    }, 5000);
+    const onEvent = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(`Video failed before ${eventName}`));
+    };
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      video.removeEventListener(eventName, onEvent);
+      video.removeEventListener("error", onError);
+    };
+    video.addEventListener(eventName, onEvent, { once: true });
+    video.addEventListener("error", onError, { once: true });
+  });
 }
 
 function segmentLabel(segment: StructureSlot["segment"]) {

@@ -39,6 +39,7 @@ export type VideoMetadata = {
   sizeBytes: number;
   coverUrl?: string;
   localPath?: string;
+  previewFrameDataUrls?: string[];
 };
 
 export type TranscriptLine = {
@@ -167,4 +168,3 @@ export type RunResult = {
   };
   generated: GeneratedPlan;
 };
-

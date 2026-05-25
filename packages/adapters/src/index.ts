@@ -149,6 +149,11 @@ export const modelVideoUnderstandingAdapter: ToolProtocol<
       return { provider: "mock", error: "Ark credentials are not configured." };
     }
 
+    const uploadedFrames = normalizeUploadedFrameDataUrls(input.video.previewFrameDataUrls);
+    if (uploadedFrames.length) {
+      return requestVideoUnderstanding(input, uploadedFrames);
+    }
+
     if (!input.video.localPath) {
       return { provider: "mock", model, error: "Video localPath is missing; cannot sample visual frames." };
     }
@@ -158,50 +163,7 @@ export const modelVideoUnderstandingAdapter: ToolProtocol<
       return { provider: "ark", model, error: sampled.error ?? "No frames were extracted from the uploaded video." };
     }
 
-    try {
-      const baseUrl = normalizeBaseUrl(process.env.ARK_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3");
-      const response = await fetchWithTimeout(
-        `${baseUrl}/chat/completions`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${apiKey}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            model,
-            messages: buildVideoUnderstandingMessages(input, sampled.frames),
-            temperature: 0.2,
-            max_tokens: 1800
-          })
-        },
-        90_000
-      );
-
-      if (!response.ok) {
-        return { provider: "ark", model, frameCount: sampled.frames.length, error: `Ark vision request failed with ${response.status}: ${await safeResponseText(response)}` };
-      }
-
-      const data = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
-      const content = data.choices?.[0]?.message?.content;
-      if (!content) return { provider: "ark", model, frameCount: sampled.frames.length, error: "Ark vision response did not include message content." };
-
-      return {
-        provider: "ark",
-        model,
-        frameCount: sampled.frames.length,
-        analysis: normalizeVideoUnderstanding(parseJsonObject(content))
-      };
-    } catch (error) {
-      return {
-        provider: "ark",
-        model,
-        frameCount: sampled.frames.length,
-        error: error instanceof Error ? error.message : "Unknown Ark vision adapter error."
-      };
-    }
+    return requestVideoUnderstanding(input, sampled.frames);
   }
 };
 
@@ -464,6 +426,55 @@ function buildVideoUnderstandingMessages(input: ModelVideoUnderstandingInput, fr
   ];
 }
 
+async function requestVideoUnderstanding(input: ModelVideoUnderstandingInput, frames: string[]) {
+  const model = process.env.ARK_ENDPOINT_ID || process.env.ARK_MODEL;
+  const apiKey = process.env.ARK_API_KEY;
+  try {
+    const baseUrl = normalizeBaseUrl(process.env.ARK_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3");
+    const response = await fetchWithTimeout(
+      `${baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          messages: buildVideoUnderstandingMessages(input, frames),
+          temperature: 0.2,
+          max_tokens: 1800
+        })
+      },
+      90_000
+    );
+
+    if (!response.ok) {
+      return { provider: "ark" as const, model, frameCount: frames.length, error: `Ark vision request failed with ${response.status}: ${await safeResponseText(response)}` };
+    }
+
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) return { provider: "ark" as const, model, frameCount: frames.length, error: "Ark vision response did not include message content." };
+
+    return {
+      provider: "ark" as const,
+      model,
+      frameCount: frames.length,
+      analysis: normalizeVideoUnderstanding(parseJsonObject(content))
+    };
+  } catch (error) {
+    return {
+      provider: "ark" as const,
+      model,
+      frameCount: frames.length,
+      error: error instanceof Error ? error.message : "Unknown Ark vision adapter error."
+    };
+  }
+}
+
 async function sampleVideoFrames(filePath: string, videoId: string) {
   const ffmpeg = resolveFfmpegPath();
   const frameCount = Number(process.env.VISION_FRAME_COUNT ?? 6);
@@ -492,12 +503,26 @@ async function sampleVideoFrames(filePath: string, videoId: string) {
   }
 }
 
+function normalizeUploadedFrameDataUrls(value: string[] | undefined) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((frame) => frame.match(/^data:image\/(?:jpeg|png);base64,(.+)$/)?.[1])
+    .filter((frame): frame is string => Boolean(frame))
+    .slice(0, Number(process.env.VISION_FRAME_COUNT ?? 6));
+}
+
 function resolveFfmpegPath() {
-  return process.env.FFMPEG_PATH || bundledFfmpegPath || "ffmpeg";
+  return resolveBundledAwareBinary(process.env.FFMPEG_PATH, bundledFfmpegPath, "ffmpeg");
 }
 
 function resolveFfprobePath() {
-  return process.env.FFPROBE_PATH || bundledFfprobePath || "ffprobe";
+  return resolveBundledAwareBinary(process.env.FFPROBE_PATH, bundledFfprobePath, "ffprobe");
+}
+
+function resolveBundledAwareBinary(configuredValue: string | undefined, bundledPath: string | null | undefined, commandName: string) {
+  const configured = configuredValue?.trim();
+  if (configured && configured !== commandName) return configured;
+  return bundledPath || configured || commandName;
 }
 
 function normalizeVideoUnderstanding(value: unknown): ModelVideoUnderstanding {

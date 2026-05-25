@@ -73,6 +73,7 @@ app.post("/api/upload/:role", upload.single("video"), async (request, response, 
       filePath: file.path,
       sizeBytes: file.size
     });
+    metadata.previewFrameDataUrls = parsePreviewFrames(request.body.previewFrames);
     uploadedVideos.set(metadata.id, metadata);
     response.json({ video: metadata });
   } catch (error) {
@@ -142,4 +143,16 @@ function getVideoOrMock(id: string | undefined, role: "sample" | "material"): Vi
     fps: 30,
     sizeBytes: 0
   };
+}
+
+function parsePreviewFrames(value: unknown): string[] | undefined {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    const frames = parsed.filter((item): item is string => typeof item === "string" && /^data:image\/(jpeg|png);base64,/.test(item)).slice(0, 8);
+    return frames.length ? frames : undefined;
+  } catch {
+    return undefined;
+  }
 }
