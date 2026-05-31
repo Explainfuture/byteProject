@@ -581,7 +581,8 @@ async function composeModelGeneratedPlan(
   knowledge: KnowledgeEntry[],
   materialSegments: MaterialSegment[]
 ): Promise<GeneratedPlan> {
-  if (requiresModelPlanning() && !context.sampleVision?.analysis) {
+  const templatePresetMode = canPlanFromTemplatePreset(context);
+  if (requiresModelPlanning() && !context.sampleVision?.analysis && !templatePresetMode) {
     throw new Error("Model video understanding is required before composing a production plan.");
   }
 
@@ -596,7 +597,14 @@ async function composeModelGeneratedPlan(
     throw new Error(result.error || "Model did not return a production plan.");
   }
 
-  return buildGeneratedPlanFromModel(source, sample, materialSegments, result.plan);
+  const generated = buildGeneratedPlanFromModel(source, sample, materialSegments, result.plan);
+  if (templatePresetMode && !context.sampleVision?.analysis) {
+    generated.compositionPlan.rationale = [
+      "Template preset path: no uploaded frames were available, so the model composed from the selected preset brief and generated candidate material slots.",
+      ...generated.compositionPlan.rationale
+    ].slice(0, 5);
+  }
+  return generated;
 }
 
 function buildGeneratedPlanFromModel(
@@ -703,6 +711,14 @@ function requiresModelPlanning() {
   return process.env.ALLOW_LOCAL_RULE_FALLBACK !== "true";
 }
 
+function canPlanFromTemplatePreset(context: AgentContext) {
+  return isTemplatePresetVideo(context.sampleVideo) && isTemplatePresetVideo(context.materialVideo);
+}
+
+function isTemplatePresetVideo(video: VideoMetadata) {
+  return video.id.startsWith("template-");
+}
+
 function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: AgentRunResult["agentMode"]): AgentRunResult {
   if (!context.sample || !context.knowledge || !context.materialSegments || !context.generated) {
     throw new Error("Agent context is incomplete.");
@@ -724,6 +740,13 @@ function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: Ag
 
 function addAnalysisRationale(context: AgentContext) {
   if (!context.generated) return;
+  if (!context.sampleVision?.analysis && isTemplatePresetVideo(context.sampleVideo)) {
+    context.generated.compositionPlan.rationale = [
+      "Using selected preset video template: no uploaded frames were available, so the model planned from the preset brief and candidate material slots.",
+      ...context.generated.compositionPlan.rationale
+    ].slice(0, 5);
+    return;
+  }
   const frameCount = getFrameCount(context.sampleVideo, context.sampleVision);
   const uploadedBasis = frameCount > 0 ? `已接收上传视频并抽取 ${frameCount} 张关键帧` : "已接收上传视频元数据";
   context.generated.compositionPlan.rationale = [

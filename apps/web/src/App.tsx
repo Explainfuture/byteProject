@@ -521,6 +521,7 @@ export function App() {
     const finalPrompt = extraInstruction ? `${basePrompt}\n\n改片指令：${extraInstruction}` : basePrompt;
     const payload = {
       sampleVideoIds: [sampleVideo?.id ?? "sample-mock"],
+      materialVideoId: sampleVideo?.id ?? "sample-mock",
       prompt: finalPrompt,
       productName: form.productName,
       sellingPoints,

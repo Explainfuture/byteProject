@@ -63,6 +63,42 @@ const marketingAtoms: TechniqueAtom[] = [
     applicableWhen: ["素材少", "只有一段长视频或单个商品镜头"],
     constraints: ["不要连续重复超过 2 次", "放大后仍需清晰"],
     outputHint: "裁切、局部放大、重复利用同一镜头生成多个片段"
+  },
+  {
+    id: "atom-pattern-interruption-hook",
+    kind: "hook",
+    name: "Pattern interruption hook",
+    intent: "Break the scroll in the first second with a visual contradiction, result-first claim, or problem reveal before explaining the product.",
+    applicableWhen: ["template preset has no real footage", "the opening looks like a static title card", "the product benefit is abstract"],
+    constraints: ["first caption should be concrete and curiosity-driven", "avoid generic slogans", "show a moving layout cue within the first 0.8s"],
+    outputHint: "Use a moving headline, snap zoom, contrast stripe, countdown chip, or split-screen proof teaser instead of one centered sentence."
+  },
+  {
+    id: "atom-proof-before-after-stack",
+    kind: "slot",
+    name: "Before-after proof stack",
+    intent: "Turn a selling point into believable evidence by showing problem, action, and result as three quick visual states.",
+    applicableWhen: ["needs purchase persuasion", "comparison footage is missing", "the claim needs proof"],
+    constraints: ["do not invent measurable claims", "label weak evidence as scenario or expected effect", "keep each state under 2s"],
+    outputHint: "Render problem card -> action/process card -> result card with a clear before/after divider and a fast beat cut."
+  },
+  {
+    id: "atom-motion-packaging-system",
+    kind: "packaging",
+    name: "Motion packaging system",
+    intent: "Make low-material videos feel edited by combining kinetic subtitles, cards, progress bars, sticker chips, and CTA buttons.",
+    applicableWhen: ["only text_card assets are available", "template rendering needs more energy", "video feels like slide playback"],
+    constraints: ["every slot must have a different layout", "no more than one centered-only caption in a row", "motion should support the message"],
+    outputHint: "Use animated benefit cards, moving accent bars, progress indicators, sticky labels, and bottom CTA plates across the timeline."
+  },
+  {
+    id: "atom-cta-specific-action",
+    kind: "cta",
+    name: "Specific action CTA",
+    intent: "End with a concrete next action tied to the strongest benefit instead of a generic call to buy.",
+    applicableWhen: ["conversion is the goal", "viewer needs a final push", "the offer slot is weak"],
+    constraints: ["CTA must fit one short line", "avoid fake urgency or unsupported discounts"],
+    outputHint: "Use a button-like CTA plate plus one benefit reminder, for example try it today, compare your old workflow, or save this checklist."
   }
 ];
 
@@ -73,8 +109,8 @@ export const seedKnowledge: KnowledgeEntry[] = [
     source: "seed",
     vertical: "marketing",
     atoms: marketingAtoms,
-    rhythmPattern: "2s hook + 3s product reveal + 8s proof/benefits + 2s CTA",
-    packagingPattern: ["顶部短标题条", "卖点卡片", "关键字强调贴纸", "结尾 CTA 条"],
+    rhythmPattern: "0-1s pattern interruption + 2s problem/result hook + fast proof stack + benefit card sequence + concrete CTA",
+    packagingPattern: ["moving headline", "benefit card stack", "before-after divider", "progress bar", "sticker chip", "button-like CTA plate"],
     applicableWhen: ["商品推广", "电商种草", "素材可从长视频重构"],
     structureSlots: [
       {
@@ -165,4 +201,3 @@ export class KnowledgeStore {
 }
 
 export const knowledgeStore = new KnowledgeStore();
-

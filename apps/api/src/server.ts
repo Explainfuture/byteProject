@@ -142,6 +142,19 @@ app.listen(port, () => {
 
 function getVideoOrMock(id: string | undefined, role: "sample" | "material"): VideoMetadata {
   if (id && uploadedVideos.has(id)) return uploadedVideos.get(id)!;
+  const templateName = id?.startsWith("template-") ? `${id.slice("template-".length)} preset.mp4` : undefined;
+  if (id && templateName) {
+    return {
+      id,
+      role,
+      fileName: templateName,
+      durationSec: 18,
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      sizeBytes: 0
+    };
+  }
   return {
     id: id || `${role}-mock`,
     role,

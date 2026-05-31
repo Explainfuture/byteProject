@@ -1,4 +1,4 @@
-import { knowledgeStore } from "@byteproject/knowledge";
+import { knowledgeStore, seedKnowledge } from "@byteproject/knowledge";
 import { creativeReconstructionSkills, inferCreativeSkillIds } from "@byteproject/shared";
 import type {
   AssetType,
@@ -158,7 +158,7 @@ export function createBriefDrivenTranscript(source: Partial<BriefDrivenTranscrip
 }
 
 export function analyzeSampleVideo(video: VideoMetadata, transcript = createMockTranscript(), options: AnalysisOptions = {}): SampleAnalysis {
-  const seed = knowledgeStore.retrieve({ vertical: "marketing", limit: 1 })[0];
+  const seed = seedKnowledge.find((entry) => entry.vertical === "marketing") ?? seedKnowledge[0];
   const atoms = deriveAtomsFromTranscript(transcript, seed.atoms);
   const slots = seed.structureSlots.map((slot, index) => ({
     ...slot,

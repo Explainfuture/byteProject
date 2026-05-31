@@ -79,6 +79,28 @@ describe("mock P0 pipeline", () => {
     expect(longMatches.some((match) => match.status === "matched")).toBe(true);
   });
 
+  it("keeps sample slot ids stable across repeated persisted analyses", () => {
+    const baseVideo: VideoMetadata = {
+      id: "template-regression-a",
+      role: "sample",
+      fileName: "template-a.mp4",
+      durationSec: 18,
+      width: 1080,
+      height: 1920,
+      fps: 30,
+      sizeBytes: 0
+    };
+    const first = analyzeSampleVideo(baseVideo, createBriefDrivenTranscript({ productName: "A" }, baseVideo));
+    const second = analyzeSampleVideo(
+      { ...baseVideo, id: "template-regression-b", fileName: "template-b.mp4" },
+      createBriefDrivenTranscript({ productName: "B" }, baseVideo)
+    );
+
+    expect(first.slots[0].id).toBe("template-regression-a-slot-hook");
+    expect(second.slots[0].id).toBe("template-regression-b-slot-hook");
+    expect(second.slots.some((slot) => slot.id.includes("template-regression-a"))).toBe(false);
+  });
+
   it("infers creative SKU choices from the user brief instead of requiring manual selection", () => {
     const ids = inferCreativeSkillIds({
       prompt: "把样例迁移成高转化电商测评短视频，开头要更快更抓人",

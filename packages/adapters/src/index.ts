@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { creativeReconstructionSkills } from "@byteproject/shared";
@@ -102,14 +102,15 @@ export const remotionStoryboardAdapter: ToolProtocol<
   fallback: "Create an HTML storyboard preview if MP4 rendering is unavailable.",
   async run(input) {
     await mkdir(input.outputDir, { recursive: true });
-    const htmlFileName = `${input.plan.id}.html`;
-    const htmlPath = join(input.outputDir, htmlFileName);
-    await writeFile(htmlPath, renderTimelineHtml(input.plan), "utf8");
 
     try {
       const mp4 = await renderTimelineMp4(input.plan, input.outputDir, input.materialVideo, input.materialSegments);
       return mp4;
-    } catch {
+    } catch (error) {
+      if (process.env.ENABLE_HTML_PREVIEW_FALLBACK !== "true") throw error;
+      const htmlFileName = `${input.plan.id}.html`;
+      const htmlPath = join(input.outputDir, htmlFileName);
+      await writeFile(htmlPath, renderTimelineHtml(input.plan), "utf8");
       return {
         path: htmlPath,
         url: `/outputs/${htmlFileName}`
@@ -452,30 +453,40 @@ async function renderTimelineMp4(plan: GeneratedPlan, outputDir: string, materia
   const fileName = `${plan.id}.mp4`;
   const assFileName = `${plan.id}.ass`;
   const outputPath = join(outputDir, fileName);
+  const sidecarNames = new Set<string>([assFileName]);
   await writeFile(join(outputDir, assFileName), renderTimelineAss(plan), "utf8");
   const hasStructuredMaterial = Boolean(materialVideo?.localPath && materialSegments.length);
 
-  if (hasStructuredMaterial) {
-    await renderSegmentTimelineMp4({
-      ffmpeg,
-      plan,
-      outputDir,
-      materialVideo: materialVideo!,
-      materialSegments,
-      assFileName,
-      fileName
-    });
+  try {
+    if (hasStructuredMaterial) {
+      await renderSegmentTimelineMp4({
+        ffmpeg,
+        plan,
+        outputDir,
+        materialVideo: materialVideo!,
+        materialSegments,
+        assFileName,
+        fileName,
+        sidecarNames
+      });
+    } else {
+      await renderSyntheticTimelineMp4({
+        ffmpeg,
+        plan,
+        outputDir,
+        materialVideo,
+        assFileName,
+        fileName,
+        sidecarNames
+      });
+    }
     return {
       path: outputPath,
       url: `/outputs/${fileName}`
     };
+  } finally {
+    await cleanupOutputFiles(outputDir, [...sidecarNames]);
   }
-
-  await renderLoopBackgroundMp4({ ffmpeg, plan, outputDir, materialVideo, assFileName, fileName });
-  return {
-    path: outputPath,
-    url: `/outputs/${fileName}`
-  };
 }
 
 async function renderSegmentTimelineMp4(input: {
@@ -486,17 +497,20 @@ async function renderSegmentTimelineMp4(input: {
   materialSegments: MaterialSegment[];
   assFileName: string;
   fileName: string;
+  sidecarNames: Set<string>;
 }) {
   const segmentById = new Map(input.materialSegments.map((segment) => [segment.id, segment]));
   const clipNames: string[] = [];
 
   for (const [index, item] of input.plan.timeline.entries()) {
     const clipName = `${input.plan.id}-clip-${String(index + 1).padStart(3, "0")}.mp4`;
+    input.sidecarNames.add(clipName);
     const segment = resolveTimelineSegment(item.assetIds, segmentById, input.materialSegments, index);
     const itemDuration = resolveTimelineItemDuration(item);
 
     if (segment && input.materialVideo.localPath) {
       const sourceName = `${input.plan.id}-source-${String(index + 1).padStart(3, "0")}.mp4`;
+      input.sidecarNames.add(sourceName);
       await renderSourceSegmentClip(input.ffmpeg, input.outputDir, input.materialVideo.localPath, sourceName, segment);
       await renderLoopedClip(input.ffmpeg, input.outputDir, sourceName, clipName, itemDuration);
     } else {
@@ -508,6 +522,8 @@ async function renderSegmentTimelineMp4(input: {
 
   const concatFileName = `${input.plan.id}-concat.txt`;
   const stitchedFileName = `${input.plan.id}-stitched.mp4`;
+  input.sidecarNames.add(concatFileName);
+  input.sidecarNames.add(stitchedFileName);
   await writeFile(join(input.outputDir, concatFileName), clipNames.map((name) => `file '${name.replace(/'/g, "'\\''")}'`).join("\n"), "utf8");
   await execJson(input.ffmpeg, ["-y", "-f", "concat", "-safe", "0", "-i", concatFileName, "-c", "copy", stitchedFileName], { cwd: input.outputDir });
   await execJson(
@@ -595,7 +611,7 @@ async function renderCardClip(ffmpeg: string, outputDir: string, clipName: strin
       "-i",
       `color=c=${cardColor(index)}:s=1080x1920:d=${duration}:r=30`,
       "-vf",
-      "format=yuv420p",
+      syntheticShotFilter(index, duration),
       "-an",
       "-c:v",
       "libx264",
@@ -604,6 +620,61 @@ async function renderCardClip(ffmpeg: string, outputDir: string, clipName: strin
       clipName
     ],
     { cwd: outputDir }
+  );
+}
+
+async function renderSyntheticTimelineMp4(input: {
+  ffmpeg: string;
+  plan: GeneratedPlan;
+  outputDir: string;
+  materialVideo?: VideoMetadata;
+  assFileName: string;
+  fileName: string;
+  sidecarNames: Set<string>;
+}) {
+  if (input.materialVideo?.localPath) {
+    await renderLoopBackgroundMp4(input);
+    return;
+  }
+
+  const timeline = input.plan.timeline.length
+    ? input.plan.timeline
+    : [{ id: "synthetic-fallback", startSec: 0, endSec: resolvePlanDuration(input.plan), slotId: "hook", assetIds: [], caption: "", packaging: [] }];
+  const clipNames: string[] = [];
+
+  for (const [index, item] of timeline.entries()) {
+    const clipName = `${input.plan.id}-clip-${String(index + 1).padStart(3, "0")}.mp4`;
+    input.sidecarNames.add(clipName);
+    await renderCardClip(input.ffmpeg, input.outputDir, clipName, resolveTimelineItemDuration(item), index);
+    clipNames.push(clipName);
+  }
+
+  const concatFileName = `${input.plan.id}-concat.txt`;
+  const stitchedFileName = `${input.plan.id}-stitched.mp4`;
+  input.sidecarNames.add(concatFileName);
+  input.sidecarNames.add(stitchedFileName);
+  await writeFile(join(input.outputDir, concatFileName), clipNames.map((name) => `file '${name.replace(/'/g, "'\\''")}'`).join("\n"), "utf8");
+  await execJson(input.ffmpeg, ["-y", "-f", "concat", "-safe", "0", "-i", concatFileName, "-c", "copy", stitchedFileName], { cwd: input.outputDir });
+  await execJson(
+    input.ffmpeg,
+    [
+      "-y",
+      "-i",
+      stitchedFileName,
+      "-vf",
+      `ass=${input.assFileName}`,
+      "-an",
+      "-r",
+      "30",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      input.fileName
+    ],
+    { cwd: input.outputDir }
   );
 }
 
@@ -616,53 +687,32 @@ async function renderLoopBackgroundMp4(input: {
   fileName: string;
 }) {
   const duration = String(resolvePlanDuration(input.plan));
-  const videoFilter = [
-    baseVideoFilter(),
-    `ass=${input.assFileName}`
-  ].join(",");
-  const colorFilter = `ass=${input.assFileName}`;
-  const hasMaterialVideo = Boolean(input.materialVideo?.localPath);
-  const args = hasMaterialVideo
-    ? [
-        "-y",
-        "-stream_loop",
-        "-1",
-        "-i",
-        input.materialVideo!.localPath!,
-        "-t",
-        duration,
-        "-vf",
-        videoFilter,
-        "-an",
-        "-r",
-        "30",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        input.fileName
-      ]
-    : [
-        "-y",
-        "-f",
-        "lavfi",
-        "-i",
-        `color=c=0x111317:s=1080x1920:d=${duration}:r=30`,
-        "-vf",
-        colorFilter,
-        "-an",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        input.fileName
-      ];
-
-  await execJson(input.ffmpeg, args, { cwd: input.outputDir });
+  const videoFilter = [baseVideoFilter(), "eq=contrast=1.08:saturation=1.12", movingOverlayFilter(0), `ass=${input.assFileName}`].join(",");
+  await execJson(
+    input.ffmpeg,
+    [
+      "-y",
+      "-stream_loop",
+      "-1",
+      "-i",
+      input.materialVideo!.localPath!,
+      "-t",
+      duration,
+      "-vf",
+      videoFilter,
+      "-an",
+      "-r",
+      "30",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      input.fileName
+    ],
+    { cwd: input.outputDir }
+  );
 }
 
 function baseVideoFilter() {
@@ -683,8 +733,94 @@ function resolveTimelineItemDuration(item: { startSec: number; endSec: number })
 }
 
 function cardColor(index: number) {
-  const colors = ["0x111317", "0x1A2430", "0x241E2E", "0x203028", "0x2E2618"];
+  const colors = ["0x111317", "0x17292F", "0x2A1C34", "0x163025", "0x302818", "0x1B2233"];
   return colors[index % colors.length];
+}
+
+function syntheticShotFilter(index: number, duration: number) {
+  return [
+    "format=rgba",
+    movingOverlayFilter(index),
+    shotLayoutFilter(index, duration),
+    "format=yuv420p"
+  ].join(",");
+}
+
+function movingOverlayFilter(index: number) {
+  const accent = accentColor(index);
+  const warm = warmAccentColor(index);
+  return [
+    `drawbox=x=${expr("-260+mod(t*260\\,1600)")}:y=132:w=520:h=10:color=${accent}@0.72:t=fill`,
+    `drawbox=x=${expr("820-mod(t*150\\,520)")}:y=1540:w=360:h=18:color=${warm}@0.60:t=fill`,
+    `drawbox=x=${expr("70+18*sin(t*2.1)")}:y=${expr("270+22*cos(t*1.7)")}:w=930:h=520:color=0xffffff@0.055:t=fill`,
+    `drawbox=x=${expr("120+28*cos(t*1.4)")}:y=${expr("1230+18*sin(t*2.3)")}:w=840:h=260:color=0x000000@0.22:t=fill`,
+    `drawbox=x=0:y=${expr("1810-mod(t*180\\,520)")}:w=1080:h=56:color=${accent}@0.24:t=fill`
+  ].join(",");
+}
+
+function shotLayoutFilter(index: number, duration: number) {
+  const accent = accentColor(index);
+  const progressWidth = Math.max(70, Math.min(940, Math.round(940 / Math.max(1, duration))));
+  const layouts = [
+    [
+      `drawbox=x=82:y=310:w=916:h=12:color=${accent}@0.95:t=fill`,
+      "drawbox=x=82:y=1180:w=210:h=210:color=0xffffff@0.12:t=fill",
+      "drawbox=x=326:y=1180:w=210:h=210:color=0xffffff@0.08:t=fill",
+      "drawbox=x=570:y=1180:w=210:h=210:color=0xffffff@0.08:t=fill"
+    ],
+    [
+      "drawbox=x=94:y=270:w=420:h=620:color=0xffffff@0.08:t=fill",
+      `drawbox=x=570:y=270:w=410:h=620:color=${accent}@0.16:t=fill`,
+      "drawbox=x=128:y=1120:w=824:h=150:color=0x000000@0.25:t=fill"
+    ],
+    [
+      `drawbox=x=90:y=290:w=900:h=132:color=${accent}@0.20:t=fill`,
+      "drawbox=x=140:y=520:w=800:h=6:color=0xffffff@0.30:t=fill",
+      "drawbox=x=140:y=690:w=800:h=6:color=0xffffff@0.20:t=fill",
+      "drawbox=x=140:y=860:w=800:h=6:color=0xffffff@0.14:t=fill"
+    ],
+    [
+      "drawbox=x=80:y=260:w=920:h=1160:color=0x000000@0.20:t=fill",
+      `drawbox=x=120:y=330:w=260:h=260:color=${accent}@0.20:t=fill`,
+      "drawbox=x=420:y=330:w=540:h=260:color=0xffffff@0.08:t=fill",
+      "drawbox=x=120:y=640:w=840:h=96:color=0xffffff@0.08:t=fill",
+      "drawbox=x=120:y=780:w=660:h=96:color=0xffffff@0.07:t=fill"
+    ],
+    [
+      `drawbox=x=90:y=1260:w=900:h=180:color=${accent}@0.20:t=fill`,
+      "drawbox=x=150:y=330:w=780:h=780:color=0xffffff@0.055:t=fill",
+      "drawbox=x=230:y=410:w=620:h=620:color=0x000000@0.16:t=fill"
+    ]
+  ];
+  return [
+    ...layouts[index % layouts.length],
+    `drawbox=x=70:y=1680:w=940:h=12:color=0xffffff@0.16:t=fill`,
+    `drawbox=x=${expr(`70+mod(t*${progressWidth}\\,940)`)}:y=1680:w=120:h=12:color=${accent}@0.92:t=fill`
+  ].join(",");
+}
+
+function accentColor(index: number) {
+  const colors = ["0x70E0C1", "0xFFD166", "0xFF6B6B", "0x8BD3FF", "0xB8F26D", "0xF6A6FF"];
+  return colors[index % colors.length];
+}
+
+function warmAccentColor(index: number) {
+  const colors = ["0xFFD166", "0xFF8E72", "0xF6A6FF", "0xB8F26D", "0x8BD3FF", "0x70E0C1"];
+  return colors[index % colors.length];
+}
+
+function expr(value: string) {
+  return `'${value}'`;
+}
+
+async function cleanupOutputFiles(outputDir: string, fileNames: string[]) {
+  await Promise.all(
+    fileNames.map((fileName) =>
+      rm(join(outputDir, fileName), {
+        force: true
+      })
+    )
+  );
 }
 
 function renderTimelineAss(plan: GeneratedPlan) {
@@ -697,10 +833,11 @@ function renderTimelineAss(plan: GeneratedPlan) {
       const packaging = [...item.packaging.slice(0, 2), item.transition ? `转场：${item.transition}` : "", item.beatHint ? `节奏：${item.beatHint}` : ""]
         .filter(Boolean)
         .join(" / ");
+      const mainY = 450 + (index % 3) * 80;
       return [
-        `Dialogue: 0,${start},${end},Top,,0,0,0,,${assText(title)}`,
-        `Dialogue: 1,${start},${end},Main,,0,0,0,,${assText(caption)}`,
-        packaging ? `Dialogue: 2,${start},${end},Bottom,,0,0,0,,${assText(packaging)}` : ""
+        `Dialogue: 0,${start},${end},Top,,0,0,0,,{\\an7\\pos(84,112)\\fad(120,120)}${assText(title)}`,
+        `Dialogue: 1,${start},${end},Main,,0,0,0,,{\\an7\\move(92,${mainY + 52},92,${mainY},0,260)\\fad(100,120)}${assText(caption)}`,
+        packaging ? `Dialogue: 2,${start},${end},Bottom,,0,0,0,,{\\an1\\pos(92,1578)\\fad(160,120)}${assText(packaging)}` : ""
       ]
         .filter(Boolean)
         .join("\n");
@@ -716,9 +853,9 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Top, Microsoft YaHei, 42, &H00D9FFF7, &H00FFFFFF, &H00101517, &H99000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 8, 72, 72, 96, 1
-Style: Main, Microsoft YaHei, 70, &H00FFFFFF, &H00FFFFFF, &H00101517, &HAA000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 5, 1, 5, 84, 84, 96, 1
-Style: Bottom, Microsoft YaHei, 38, &H00F9E3C1, &H00FFFFFF, &H00101517, &HAA000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 2, 72, 72, 130, 1
+Style: Top, Microsoft YaHei, 38, &H00D9FFF7, &H00FFFFFF, &H00101517, &H99000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 8, 72, 72, 96, 1
+Style: Main, Microsoft YaHei, 76, &H00FFFFFF, &H00FFFFFF, &H00101517, &HAA000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 5, 2, 7, 84, 84, 96, 1
+Style: Bottom, Microsoft YaHei, 40, &H00F9E3C1, &H00FFFFFF, &H00101517, &HAA000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 1, 72, 72, 130, 1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -881,7 +1018,11 @@ function buildModelPlanComposerMessages(input: ModelPlanComposerInput) {
           useOnlyAssetIdsFrom: input.materialSegments.map((segment) => segment.id),
           ifMaterialMissing: "leave assetIds empty, mark the slot weak_match or missing, and provide a packaging/copy/reuse/aigc gapPlan",
           captions: "Chinese, short enough for mobile vertical video",
-          preserveMeaning: "transfer structure and method only; never clone sample content"
+          preserveMeaning: "transfer structure and method only; never clone sample content",
+          visualVariety:
+            "do not output five identical centered text cards. Every timeline item needs a distinct layout cue: split screen, moving headline, benefit card stack, before/after proof, progress bar, counter, sticker, CTA button, snap zoom, or rhythmic transition.",
+          purchaseIntent:
+            "make the viewer understand the problem, believe the proof, and know the next action; avoid vague slogans."
         },
         outputSchema: {
           script: "string",
@@ -907,9 +1048,9 @@ function buildModelPlanComposerMessages(input: ModelPlanComposerInput) {
               endSec: "number",
               assetIds: ["ids from materialSegments or empty"],
               caption: "short Chinese caption",
-              packaging: ["1-3 render instructions"],
-              transition: "transition instruction",
-              beatHint: "rhythm/BGM cue"
+              packaging: ["1-3 visual render instructions with motion/layout, not just text"],
+              transition: "specific transition instruction such as snap zoom, wipe, split reveal, card push, or beat cut",
+              beatHint: "rhythm/BGM cue and pacing intent"
             }
           ],
           storyboard: [
