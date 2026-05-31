@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { z } from "zod";
-import { modelCreativeAdapter, modelVideoUnderstandingAdapter, remotionStoryboardAdapter } from "@byteproject/adapters";
-import { analyzeSampleVideo, composePlan, createBriefDrivenTranscript, segmentLongVideo } from "@byteproject/core";
+import { modelCreativeAdapter, modelPlanComposerAdapter, modelVideoUnderstandingAdapter, remotionStoryboardAdapter } from "@byteproject/adapters";
+import { analyzeSampleVideo, createBriefDrivenTranscript, segmentLongVideo } from "@byteproject/core";
 import { knowledgeStore } from "@byteproject/knowledge";
 import { inferCreativeSkillIds } from "@byteproject/shared";
 import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, RunResult, SampleAnalysis, SourceInput, StructureSlot, VideoMetadata } from "@byteproject/shared";
@@ -291,14 +291,20 @@ const agentTools: AgentTool[] = [
     },
     async execute(input, context) {
       const parsed = z.object({ strategy: creativeStrategySchema.optional() }).parse(input);
-      const sample = context.sample ?? (await analyzeSampleWithVision(context.sampleVideo, context.source)).analysis;
+      let sample = context.sample;
+      if (!sample) {
+        const sampleResult = await analyzeSampleWithVision(context.sampleVideo, context.source);
+        sample = sampleResult.analysis;
+        context.sample = sample;
+        context.sampleVision = sampleResult.model;
+      }
       const knowledge = context.knowledge ?? knowledgeStore.retrieve({ vertical: "marketing", prompt: context.source.prompt, limit: 3 });
       const materialSegments = context.materialSegments ?? segmentLongVideo(context.materialVideo, context.source.prompt, context.source.targetDurationSec);
       context.sample = sample;
       context.knowledge = knowledge;
       context.materialSegments = materialSegments;
       const source = parsed.strategy ? { ...context.source, strategy: parsed.strategy } : context.source;
-      context.generated = composePlan({ source, samples: [sample], knowledge, materialSegments });
+      context.generated = await composeModelGeneratedPlan(context, source, sample, knowledge, materialSegments);
       context.source = source;
       return { generated: context.generated };
     }
@@ -345,7 +351,12 @@ const agentTools: AgentTool[] = [
     async execute(_input, context) {
       if (!context.generated) throw new Error("compose_video_plan must run before render_preview.");
       addAnalysisRationale(context);
-      const preview = await remotionStoryboardAdapter.run({ plan: context.generated, outputDir: context.outputDir, materialVideo: context.materialVideo });
+      const preview = await remotionStoryboardAdapter.run({
+        plan: context.generated,
+        outputDir: context.outputDir,
+        materialVideo: context.materialVideo,
+        materialSegments: context.materialSegments
+      });
       context.generated.demo = {
         status: "rendered",
         url: preview.url,
@@ -371,7 +382,14 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
   const sampleResult = await analyzeSampleWithVision(context.sampleVideo, context.source);
   context.sample = sampleResult.analysis;
   context.sampleVision = sampleResult.model;
-  if (!sampleResult.model.analysis && sampleResult.model.error) {
+  if (sampleResult.model.analysis) {
+    trace.push({
+      tool: "vision_model",
+      ok: true,
+      input: { videoId: context.sampleVideo.id },
+      observation: safeModelStatus(sampleResult.model)
+    });
+  } else if (sampleResult.model.error) {
     trace.push({
       tool: "vision_model",
       ok: false,
@@ -381,12 +399,32 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
   }
   context.knowledge = knowledgeStore.retrieve({ vertical: "marketing", prompt: context.source.prompt, limit: 3 });
   context.materialSegments = segmentLongVideo(context.materialVideo, context.source.prompt, context.source.targetDurationSec);
-  context.generated = composePlan({
-    source: context.source,
-    samples: [context.sample],
-    knowledge: context.knowledge,
-    materialSegments: context.materialSegments
-  });
+  try {
+    context.generated = await composeModelGeneratedPlan(context, context.source, context.sample, context.knowledge, context.materialSegments);
+    trace.push({
+      tool: "model_plan_composer",
+      ok: true,
+      input: { source: context.source.prompt },
+      observation: {
+        status: "ok",
+        timelineItems: context.generated.timeline.length,
+        slotMatches: context.generated.compositionPlan.slotMatches.length
+      }
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "model plan generation failed";
+    context.generated = buildModelRequiredFailurePlan(context.source, publicModelFailureReason(message));
+    trace.push({
+      tool: "model_plan_composer",
+      ok: false,
+      input: { source: context.source.prompt },
+      observation: {
+        status: "failed",
+        error: publicModelFailureReason(message)
+      }
+    });
+    return buildRunResult(context, trace, "fallback");
+  }
   const modelResult = await modelCreativeAdapter.run({
     source: context.source,
     sample: context.sample,
@@ -412,7 +450,12 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
     ...context.generated.compositionPlan.rationale
   ].slice(0, 5);
   addAnalysisRationale(context);
-  const preview = await remotionStoryboardAdapter.run({ plan: context.generated, outputDir: context.outputDir, materialVideo: context.materialVideo });
+  const preview = await remotionStoryboardAdapter.run({
+    plan: context.generated,
+    outputDir: context.outputDir,
+    materialVideo: context.materialVideo,
+    materialSegments: context.materialSegments
+  });
   context.generated.demo = {
     status: "rendered",
     url: preview.url,
@@ -483,6 +526,7 @@ function mergeVisionSlots(baseSlots: StructureSlot[], visionSlots?: NonNullable<
     return {
       ...slot,
       intent: vision.intent || slot.intent,
+      requiredAssetTypes: vision.requiredAssetTypes?.length ? vision.requiredAssetTypes : slot.requiredAssetTypes,
       durationSec: vision.durationSec || slot.durationSec,
       rhythmHint: vision.rhythmHint || slot.rhythmHint,
       packagingHints: vision.packagingHints?.length ? vision.packagingHints : slot.packagingHints
@@ -528,6 +572,135 @@ function applyModelEnhancement(generated: GeneratedPlan, enhancement: Awaited<Re
       };
     });
   }
+}
+
+async function composeModelGeneratedPlan(
+  context: AgentContext,
+  source: SourceInput,
+  sample: SampleAnalysis,
+  knowledge: KnowledgeEntry[],
+  materialSegments: MaterialSegment[]
+): Promise<GeneratedPlan> {
+  if (requiresModelPlanning() && !context.sampleVision?.analysis) {
+    throw new Error("Model video understanding is required before composing a production plan.");
+  }
+
+  const result = await modelPlanComposerAdapter.run({
+    source,
+    sample,
+    knowledge,
+    materialSegments
+  });
+
+  if (!result.plan) {
+    throw new Error(result.error || "Model did not return a production plan.");
+  }
+
+  return buildGeneratedPlanFromModel(source, sample, materialSegments, result.plan);
+}
+
+function buildGeneratedPlanFromModel(
+  source: SourceInput,
+  sample: SampleAnalysis,
+  materialSegments: MaterialSegment[],
+  plan: NonNullable<Awaited<ReturnType<typeof modelPlanComposerAdapter.run>>["plan"]>
+): GeneratedPlan {
+  if (!plan.timeline?.length) throw new Error("Model plan did not include a timeline.");
+  if (!plan.slotMatches?.length) throw new Error("Model plan did not include slotMatches.");
+
+  const slotIds = new Set(sample.slots.map((slot) => slot.id));
+  const materialIds = new Set(materialSegments.map((segment) => segment.id));
+  const slotMatches = plan.slotMatches
+    .filter((match) => match.slotId && slotIds.has(match.slotId))
+    .map((match) => ({
+      slotId: match.slotId!,
+      status: match.status ?? (match.assetIds?.length ? "matched" : "missing"),
+      assetIds: (match.assetIds ?? []).filter((id) => materialIds.has(id)),
+      confidence: match.confidence ?? 0.5,
+      reason: match.reason ?? "Model-selected slot match.",
+      gapPlan: match.gapPlan?.strategy
+        ? {
+            strategy: match.gapPlan.strategy,
+            output: match.gapPlan.output ?? "Complete this slot with model-planned packaging."
+          }
+        : undefined
+    }));
+
+  const timeline = plan.timeline
+    .filter((item) => item.slotId && slotIds.has(item.slotId) && typeof item.startSec === "number" && typeof item.endSec === "number" && item.endSec > item.startSec)
+    .map((item, index) => ({
+      id: item.id || `timeline-${index + 1}`,
+      startSec: Number(item.startSec!.toFixed(2)),
+      endSec: Number(item.endSec!.toFixed(2)),
+      slotId: item.slotId!,
+      assetIds: (item.assetIds ?? []).filter((id) => materialIds.has(id)),
+      caption: item.caption || "Model planned caption",
+      packaging: item.packaging?.length ? item.packaging : ["Model planned packaging"],
+      transition: item.transition,
+      beatHint: item.beatHint
+    }));
+
+  if (!timeline.length) throw new Error("Model timeline did not contain valid timed items.");
+
+  const storyboard = (plan.storyboard ?? []).filter((item) => item.slotId && slotIds.has(item.slotId)).map((item, index) => ({
+    id: item.id || `storyboard-${index + 1}`,
+    slotId: item.slotId!,
+    title: item.title || `Shot ${index + 1}`,
+    visual: item.visual || "Model planned visual",
+    caption: item.caption || timeline.find((candidate) => candidate.slotId === item.slotId)?.caption || "",
+    reason: item.reason || "Model planned this shot from the extracted method."
+  }));
+
+  return {
+    id: `plan-${Date.now()}`,
+    script: plan.script || timeline.map((item) => item.caption).join("\n"),
+    storyboard,
+    timeline,
+    compositionPlan: {
+      id: `composition-${Date.now()}`,
+      strategy: source.strategy,
+      selectedAtomIds: sample.atoms.slice(0, 6).map((atom) => atom.id),
+      slotMatches,
+      rationale: [
+        "Model generated the structure transfer recipe and timeline.",
+        ...(plan.rationale ?? [])
+      ].slice(0, 5)
+    },
+    packagingSuggestions: plan.packagingSuggestions ?? [],
+    rendererPrompt: plan.rendererPrompt || "Render the model-generated timeline as a vertical MP4.",
+    previewVariants: [],
+    demo: {
+      status: "mock_ready",
+      note: "Model-generated production recipe is ready for rendering."
+    }
+  };
+}
+
+function buildModelRequiredFailurePlan(source: SourceInput, reason: string): GeneratedPlan {
+  return {
+    id: `plan-${Date.now()}`,
+    script: "",
+    storyboard: [],
+    timeline: [],
+    compositionPlan: {
+      id: `composition-${Date.now()}`,
+      strategy: source.strategy,
+      selectedAtomIds: [],
+      slotMatches: [],
+      rationale: [`Model video planning failed: ${reason}`]
+    },
+    packagingSuggestions: [],
+    rendererPrompt: "",
+    previewVariants: [],
+    demo: {
+      status: "failed",
+      note: "Model planning is required, so no local heuristic video was generated."
+    }
+  };
+}
+
+function requiresModelPlanning() {
+  return process.env.ALLOW_LOCAL_RULE_FALLBACK !== "true";
 }
 
 function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: AgentRunResult["agentMode"]): AgentRunResult {

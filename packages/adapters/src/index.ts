@@ -3,7 +3,17 @@ import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { creativeReconstructionSkills } from "@byteproject/shared";
-import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, SampleAnalysis, SourceInput, VideoMetadata } from "@byteproject/shared";
+import type {
+  AssetType,
+  GapStrategy,
+  GeneratedPlan,
+  KnowledgeEntry,
+  MatchStatus,
+  MaterialSegment,
+  SampleAnalysis,
+  SourceInput,
+  VideoMetadata
+} from "@byteproject/shared";
 
 const require = createRequire(import.meta.url);
 const bundledFfmpegPath = require("ffmpeg-static") as string | null;
@@ -80,11 +90,11 @@ export const videoAnalyzerAdapter: ToolProtocol<
 };
 
 export const remotionStoryboardAdapter: ToolProtocol<
-  { plan: GeneratedPlan; outputDir: string; materialVideo?: VideoMetadata },
+  { plan: GeneratedPlan; outputDir: string; materialVideo?: VideoMetadata; materialSegments?: MaterialSegment[] },
   { url: string; path: string }
 > = {
   name: "Remotion Storyboard Renderer",
-  inputSchema: "{ plan, outputDir, materialVideo? }",
+  inputSchema: "{ plan, outputDir, materialVideo?, materialSegments? }",
   outputSchema: "{ url, path }",
   requiredEnv: [],
   filePermissions: ["OUTPUT_DIR"],
@@ -97,7 +107,7 @@ export const remotionStoryboardAdapter: ToolProtocol<
     await writeFile(htmlPath, renderTimelineHtml(input.plan), "utf8");
 
     try {
-      const mp4 = await renderTimelineMp4(input.plan, input.outputDir, input.materialVideo);
+      const mp4 = await renderTimelineMp4(input.plan, input.outputDir, input.materialVideo, input.materialSegments);
       return mp4;
     } catch {
       return {
@@ -122,6 +132,7 @@ export type ModelVideoUnderstanding = {
   slots?: Array<{
     segment?: "hook" | "body" | "proof" | "offer" | "cta";
     intent?: string;
+    requiredAssetTypes?: AssetType[];
     durationSec?: number;
     rhythmHint?: "fast" | "medium" | "slow";
     packagingHints?: string[];
@@ -272,6 +283,117 @@ export const modelCreativeAdapter: ToolProtocol<
   }
 };
 
+export type ModelPlanComposerInput = {
+  source: SourceInput;
+  sample: SampleAnalysis;
+  knowledge: KnowledgeEntry[];
+  materialSegments: MaterialSegment[];
+};
+
+export type ModelComposedVideoPlan = {
+  script?: string;
+  rendererPrompt?: string;
+  slotMatches?: Array<{
+    slotId?: string;
+    status?: MatchStatus;
+    assetIds?: string[];
+    confidence?: number;
+    reason?: string;
+    gapPlan?: {
+      strategy?: GapStrategy;
+      output?: string;
+    };
+  }>;
+  timeline?: Array<{
+    id?: string;
+    slotId?: string;
+    startSec?: number;
+    endSec?: number;
+    assetIds?: string[];
+    caption?: string;
+    packaging?: string[];
+    transition?: string;
+    beatHint?: string;
+  }>;
+  storyboard?: Array<{
+    id?: string;
+    slotId?: string;
+    title?: string;
+    visual?: string;
+    caption?: string;
+    reason?: string;
+  }>;
+  packagingSuggestions?: string[];
+  rationale?: string[];
+};
+
+export const modelPlanComposerAdapter: ToolProtocol<
+  ModelPlanComposerInput,
+  { provider: "ark" | "mock"; model?: string; plan?: ModelComposedVideoPlan; error?: string }
+> = {
+  name: "Ark Doubao Model Video Plan Composer",
+  inputSchema: "{ source, sample, knowledge, materialSegments }",
+  outputSchema: "ModelComposedVideoPlan",
+  requiredEnv: ["ARK_BASE_URL", "ARK_API_KEY", "ARK_ENDPOINT_ID"],
+  filePermissions: [],
+  timeoutMs: 90_000,
+  fallback: "Fail the generation instead of pretending a local heuristic plan is model-generated.",
+  async run(input) {
+    if ((process.env.LLM_PROVIDER ?? "ark") !== "ark") {
+      return { provider: "mock", error: "LLM_PROVIDER is not ark." };
+    }
+
+    const apiKey = process.env.ARK_API_KEY;
+    const model = process.env.ARK_ENDPOINT_ID || process.env.ARK_MODEL;
+    if (!apiKey || apiKey === "replace_me" || !model || model === "replace_me") {
+      return { provider: "mock", error: "Ark credentials are not configured." };
+    }
+
+    try {
+      const baseUrl = normalizeBaseUrl(process.env.ARK_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3");
+      const response = await fetchWithTimeout(
+        `${baseUrl}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model,
+            messages: buildModelPlanComposerMessages(input),
+            temperature: 0.25,
+            max_tokens: 2600
+          })
+        },
+        90_000
+      );
+
+      if (!response.ok) {
+        return { provider: "ark", model, error: `Ark model plan request failed with ${response.status}: ${await safeResponseText(response)}` };
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) return { provider: "ark", model, error: "Ark response did not include message content." };
+
+      return {
+        provider: "ark",
+        model,
+        plan: normalizeModelComposedPlan(parseJsonObject(content))
+      };
+    } catch (error) {
+      return {
+        provider: "ark",
+        model,
+        error: error instanceof Error ? error.message : "Unknown Ark model plan adapter error."
+      };
+    }
+  }
+};
+
 function renderTimelineHtml(plan: GeneratedPlan) {
   const blocks = plan.timeline
     .map(
@@ -325,28 +447,188 @@ function renderTimelineHtml(plan: GeneratedPlan) {
 </html>`;
 }
 
-async function renderTimelineMp4(plan: GeneratedPlan, outputDir: string, materialVideo?: VideoMetadata) {
+async function renderTimelineMp4(plan: GeneratedPlan, outputDir: string, materialVideo?: VideoMetadata, materialSegments: MaterialSegment[] = []) {
   const ffmpeg = resolveFfmpegPath();
   const fileName = `${plan.id}.mp4`;
   const assFileName = `${plan.id}.ass`;
   const outputPath = join(outputDir, fileName);
   await writeFile(join(outputDir, assFileName), renderTimelineAss(plan), "utf8");
-  const duration = String(resolvePlanDuration(plan));
+  const hasStructuredMaterial = Boolean(materialVideo?.localPath && materialSegments.length);
+
+  if (hasStructuredMaterial) {
+    await renderSegmentTimelineMp4({
+      ffmpeg,
+      plan,
+      outputDir,
+      materialVideo: materialVideo!,
+      materialSegments,
+      assFileName,
+      fileName
+    });
+    return {
+      path: outputPath,
+      url: `/outputs/${fileName}`
+    };
+  }
+
+  await renderLoopBackgroundMp4({ ffmpeg, plan, outputDir, materialVideo, assFileName, fileName });
+  return {
+    path: outputPath,
+    url: `/outputs/${fileName}`
+  };
+}
+
+async function renderSegmentTimelineMp4(input: {
+  ffmpeg: string;
+  plan: GeneratedPlan;
+  outputDir: string;
+  materialVideo: VideoMetadata;
+  materialSegments: MaterialSegment[];
+  assFileName: string;
+  fileName: string;
+}) {
+  const segmentById = new Map(input.materialSegments.map((segment) => [segment.id, segment]));
+  const clipNames: string[] = [];
+
+  for (const [index, item] of input.plan.timeline.entries()) {
+    const clipName = `${input.plan.id}-clip-${String(index + 1).padStart(3, "0")}.mp4`;
+    const segment = resolveTimelineSegment(item.assetIds, segmentById, input.materialSegments, index);
+    const itemDuration = resolveTimelineItemDuration(item);
+
+    if (segment && input.materialVideo.localPath) {
+      const sourceName = `${input.plan.id}-source-${String(index + 1).padStart(3, "0")}.mp4`;
+      await renderSourceSegmentClip(input.ffmpeg, input.outputDir, input.materialVideo.localPath, sourceName, segment);
+      await renderLoopedClip(input.ffmpeg, input.outputDir, sourceName, clipName, itemDuration);
+    } else {
+      await renderCardClip(input.ffmpeg, input.outputDir, clipName, itemDuration, index);
+    }
+
+    clipNames.push(clipName);
+  }
+
+  const concatFileName = `${input.plan.id}-concat.txt`;
+  const stitchedFileName = `${input.plan.id}-stitched.mp4`;
+  await writeFile(join(input.outputDir, concatFileName), clipNames.map((name) => `file '${name.replace(/'/g, "'\\''")}'`).join("\n"), "utf8");
+  await execJson(input.ffmpeg, ["-y", "-f", "concat", "-safe", "0", "-i", concatFileName, "-c", "copy", stitchedFileName], { cwd: input.outputDir });
+  await execJson(
+    input.ffmpeg,
+    [
+      "-y",
+      "-i",
+      stitchedFileName,
+      "-vf",
+      `ass=${input.assFileName}`,
+      "-an",
+      "-r",
+      "30",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      input.fileName
+    ],
+    { cwd: input.outputDir }
+  );
+}
+
+async function renderSourceSegmentClip(ffmpeg: string, outputDir: string, sourcePath: string, fileName: string, segment: MaterialSegment) {
+  const startSec = Math.max(0, Number(segment.startSec.toFixed(2)));
+  const duration = Math.max(0.25, Number((segment.endSec - segment.startSec).toFixed(2)));
+  await execJson(
+    ffmpeg,
+    [
+      "-y",
+      "-ss",
+      String(startSec),
+      "-i",
+      sourcePath,
+      "-t",
+      String(duration),
+      "-vf",
+      baseVideoFilter(),
+      "-an",
+      "-r",
+      "30",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      fileName
+    ],
+    { cwd: outputDir }
+  );
+}
+
+async function renderLoopedClip(ffmpeg: string, outputDir: string, sourceName: string, clipName: string, duration: number) {
+  await execJson(
+    ffmpeg,
+    [
+      "-y",
+      "-stream_loop",
+      "-1",
+      "-i",
+      sourceName,
+      "-t",
+      String(duration),
+      "-vf",
+      "fps=30,format=yuv420p",
+      "-an",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      clipName
+    ],
+    { cwd: outputDir }
+  );
+}
+
+async function renderCardClip(ffmpeg: string, outputDir: string, clipName: string, duration: number, index: number) {
+  await execJson(
+    ffmpeg,
+    [
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=${cardColor(index)}:s=1080x1920:d=${duration}:r=30`,
+      "-vf",
+      "format=yuv420p",
+      "-an",
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      clipName
+    ],
+    { cwd: outputDir }
+  );
+}
+
+async function renderLoopBackgroundMp4(input: {
+  ffmpeg: string;
+  plan: GeneratedPlan;
+  outputDir: string;
+  materialVideo?: VideoMetadata;
+  assFileName: string;
+  fileName: string;
+}) {
+  const duration = String(resolvePlanDuration(input.plan));
   const videoFilter = [
-    "scale=1080:1920:force_original_aspect_ratio=increase",
-    "crop=1080:1920",
-    "setsar=1",
-    `ass=${assFileName}`
+    baseVideoFilter(),
+    `ass=${input.assFileName}`
   ].join(",");
-  const colorFilter = `ass=${assFileName}`;
-  const hasMaterialVideo = Boolean(materialVideo?.localPath);
+  const colorFilter = `ass=${input.assFileName}`;
+  const hasMaterialVideo = Boolean(input.materialVideo?.localPath);
   const args = hasMaterialVideo
     ? [
         "-y",
         "-stream_loop",
         "-1",
         "-i",
-        materialVideo!.localPath!,
+        input.materialVideo!.localPath!,
         "-t",
         duration,
         "-vf",
@@ -360,7 +642,7 @@ async function renderTimelineMp4(plan: GeneratedPlan, outputDir: string, materia
         "yuv420p",
         "-movflags",
         "+faststart",
-        fileName
+        input.fileName
       ]
     : [
         "-y",
@@ -377,14 +659,32 @@ async function renderTimelineMp4(plan: GeneratedPlan, outputDir: string, materia
         "yuv420p",
         "-movflags",
         "+faststart",
-        fileName
+        input.fileName
       ];
 
-  await execJson(ffmpeg, args, { cwd: outputDir });
-  return {
-    path: outputPath,
-    url: `/outputs/${fileName}`
-  };
+  await execJson(input.ffmpeg, args, { cwd: input.outputDir });
+}
+
+function baseVideoFilter() {
+  return ["scale=1080:1920:force_original_aspect_ratio=increase", "crop=1080:1920", "setsar=1"].join(",");
+}
+
+function resolveTimelineSegment(assetIds: string[], segmentById: Map<string, MaterialSegment>, fallbackSegments: MaterialSegment[], timelineIndex: number) {
+  if (!assetIds.length) return undefined;
+  for (const assetId of assetIds) {
+    const segment = segmentById.get(assetId);
+    if (segment) return segment;
+  }
+  return fallbackSegments[timelineIndex % fallbackSegments.length];
+}
+
+function resolveTimelineItemDuration(item: { startSec: number; endSec: number }) {
+  return Math.max(0.5, Number((item.endSec - item.startSec).toFixed(2)));
+}
+
+function cardColor(index: number) {
+  const colors = ["0x111317", "0x1A2430", "0x241E2E", "0x203028", "0x2E2618"];
+  return colors[index % colors.length];
 }
 
 function renderTimelineAss(plan: GeneratedPlan) {
@@ -543,6 +843,105 @@ function buildCreativeMessages(input: ModelEnhancementInput) {
   ];
 }
 
+function buildModelPlanComposerMessages(input: ModelPlanComposerInput) {
+  const source = input.source;
+  const selectedSkillIds = new Set(input.source.creativeSkillIds ?? []);
+  const creativeSkills = creativeReconstructionSkills
+    .filter((skill) => selectedSkillIds.has(skill.id))
+    .map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      remotionUse: skill.remotionUse,
+      hyperframesUse: skill.hyperframesUse,
+      guardrail: skill.guardrail
+    }));
+  const knowledgeAtoms = input.knowledge.flatMap((entry) => entry.atoms).slice(0, 10).map((atom) => ({
+    id: atom.id,
+    kind: atom.kind,
+    name: atom.name,
+    intent: atom.intent,
+    outputHint: atom.outputHint,
+    constraints: atom.constraints
+  }));
+
+  return [
+    {
+      role: "system",
+      content:
+        "You are the model director for an AI short-video structure-transfer system. You must analyze the extracted viral-video method, decide the slot-to-material mapping, and output a complete production recipe for the new video. Return strict JSON only. Do not use Markdown. Do not copy the sample video's exact visuals, subtitles, brands, people, audio, or original copy. Use only material segment ids provided by the user payload."
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        task:
+          "Compose the final new-video production plan. The model, not local heuristics, must decide the transferable rules, slot matches, timeline order, captions, packaging, transitions, and expected visual effect. The backend renderer will only execute your recipe and write the MP4.",
+        constraints: {
+          outputDurationSec: source.targetDurationSec,
+          aspectRatio: "9:16",
+          useOnlyAssetIdsFrom: input.materialSegments.map((segment) => segment.id),
+          ifMaterialMissing: "leave assetIds empty, mark the slot weak_match or missing, and provide a packaging/copy/reuse/aigc gapPlan",
+          captions: "Chinese, short enough for mobile vertical video",
+          preserveMeaning: "transfer structure and method only; never clone sample content"
+        },
+        outputSchema: {
+          script: "string",
+          rendererPrompt: "string; include the expected effect and how the backend should render the plan",
+          slotMatches: [
+            {
+              slotId: "must be one of sample.slots[].id",
+              status: "matched | weak_match | missing",
+              assetIds: ["must be ids from materialSegments, or empty"],
+              confidence: "number between 0 and 1",
+              reason: "short observable reason",
+              gapPlan: {
+                strategy: "copy | packaging | reorder | reuse | aigc",
+                output: "how to complete the missing visual expression"
+              }
+            }
+          ],
+          timeline: [
+            {
+              id: "stable id, e.g. timeline-1",
+              slotId: "must match a slotMatches slotId",
+              startSec: "number",
+              endSec: "number",
+              assetIds: ["ids from materialSegments or empty"],
+              caption: "short Chinese caption",
+              packaging: ["1-3 render instructions"],
+              transition: "transition instruction",
+              beatHint: "rhythm/BGM cue"
+            }
+          ],
+          storyboard: [
+            {
+              id: "stable id",
+              slotId: "slot id",
+              title: "shot title",
+              visual: "what should appear in this shot",
+              caption: "caption",
+              reason: "why this shot follows the extracted viral method"
+            }
+          ],
+          packagingSuggestions: ["3-5 concrete packaging instructions"],
+          rationale: ["3-5 short reasons explaining the extracted rule and the new-video transformation"]
+        },
+        source,
+        extractedSampleRules: {
+          summary: input.sample.summary,
+          slots: input.sample.slots,
+          atoms: input.sample.atoms,
+          rhythmPattern: input.sample.rhythmPattern,
+          packagingPattern: input.sample.packagingPattern,
+          transcriptOverview: input.sample.transcript
+        },
+        creativeSkills,
+        knowledgeAtoms,
+        materialSegments: input.materialSegments
+      })
+    }
+  ];
+}
+
 function buildVideoUnderstandingMessages(input: ModelVideoUnderstandingInput, frames: string[]) {
   return [
     {
@@ -579,6 +978,7 @@ function buildVideoUnderstandingMessages(input: ModelVideoUnderstandingInput, fr
                 {
                   segment: "hook | body | proof | offer | cta",
                   intent: "该段结构意图",
+                  requiredAssetTypes: ["product_closeup | usage | comparison | person | scene | text_card | cover"],
                   durationSec: "number",
                   rhythmHint: "fast | medium | slow",
                   packagingHints: ["字幕/标题条/贴纸/转场/封面等包装观察"]
@@ -758,6 +1158,7 @@ function cleanSlots(value: unknown) {
     slots.push({
       segment: segment as VideoStructureSlotInsight["segment"],
       intent: typeof candidate.intent === "string" ? candidate.intent : undefined,
+      requiredAssetTypes: cleanAssetTypes(candidate.requiredAssetTypes),
       durationSec: typeof candidate.durationSec === "number" && Number.isFinite(candidate.durationSec) ? candidate.durationSec : undefined,
       rhythmHint: rhythmHint as VideoStructureSlotInsight["rhythmHint"],
       packagingHints: cleanStringList(candidate.packagingHints)
@@ -788,10 +1189,112 @@ function normalizeEnhancement(value: unknown): ModelEnhancement {
   };
 }
 
+function normalizeModelComposedPlan(value: unknown): ModelComposedVideoPlan {
+  if (!value || typeof value !== "object") return {};
+  const candidate = value as Record<string, unknown>;
+  return {
+    script: typeof candidate.script === "string" ? candidate.script : undefined,
+    rendererPrompt: typeof candidate.rendererPrompt === "string" ? candidate.rendererPrompt : undefined,
+    slotMatches: cleanModelSlotMatches(candidate.slotMatches),
+    timeline: cleanModelTimeline(candidate.timeline),
+    storyboard: cleanModelStoryboard(candidate.storyboard),
+    packagingSuggestions: cleanStringList(candidate.packagingSuggestions),
+    rationale: cleanStringList(candidate.rationale)
+  };
+}
+
+function cleanModelSlotMatches(value: unknown): ModelComposedVideoPlan["slotMatches"] {
+  if (!Array.isArray(value)) return undefined;
+  const allowedStatuses = new Set<MatchStatus>(["matched", "weak_match", "missing"]);
+  const allowedStrategies = new Set<GapStrategy>(["copy", "packaging", "reorder", "reuse", "aigc"]);
+  const matches: NonNullable<ModelComposedVideoPlan["slotMatches"]> = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const candidate = item as Record<string, unknown>;
+    const slotId = typeof candidate.slotId === "string" ? candidate.slotId : undefined;
+    if (!slotId) continue;
+    const status = typeof candidate.status === "string" && allowedStatuses.has(candidate.status as MatchStatus) ? (candidate.status as MatchStatus) : undefined;
+    const gapPlan = candidate.gapPlan && typeof candidate.gapPlan === "object" ? (candidate.gapPlan as Record<string, unknown>) : undefined;
+    const strategy = typeof gapPlan?.strategy === "string" && allowedStrategies.has(gapPlan.strategy as GapStrategy) ? (gapPlan.strategy as GapStrategy) : undefined;
+    matches.push({
+      slotId,
+      status,
+      assetIds: cleanStringList(candidate.assetIds) ?? [],
+      confidence: cleanUnitNumber(candidate.confidence),
+      reason: typeof candidate.reason === "string" ? candidate.reason : undefined,
+      gapPlan: gapPlan
+        ? {
+            strategy,
+            output: typeof gapPlan.output === "string" ? gapPlan.output : undefined
+          }
+        : undefined
+    });
+  }
+  return matches.length ? matches.slice(0, 10) : undefined;
+}
+
+function cleanModelTimeline(value: unknown): ModelComposedVideoPlan["timeline"] {
+  if (!Array.isArray(value)) return undefined;
+  const timeline: NonNullable<ModelComposedVideoPlan["timeline"]> = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const candidate = item as Record<string, unknown>;
+    const slotId = typeof candidate.slotId === "string" ? candidate.slotId : undefined;
+    if (!slotId) continue;
+    timeline.push({
+      id: typeof candidate.id === "string" ? candidate.id : undefined,
+      slotId,
+      startSec: cleanNonNegativeNumber(candidate.startSec),
+      endSec: cleanNonNegativeNumber(candidate.endSec),
+      assetIds: cleanStringList(candidate.assetIds) ?? [],
+      caption: typeof candidate.caption === "string" ? candidate.caption : undefined,
+      packaging: cleanStringList(candidate.packaging) ?? [],
+      transition: typeof candidate.transition === "string" ? candidate.transition : undefined,
+      beatHint: typeof candidate.beatHint === "string" ? candidate.beatHint : undefined
+    });
+  }
+  return timeline.length ? timeline.slice(0, 12) : undefined;
+}
+
+function cleanModelStoryboard(value: unknown): ModelComposedVideoPlan["storyboard"] {
+  if (!Array.isArray(value)) return undefined;
+  const storyboard: NonNullable<ModelComposedVideoPlan["storyboard"]> = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const candidate = item as Record<string, unknown>;
+    const slotId = typeof candidate.slotId === "string" ? candidate.slotId : undefined;
+    if (!slotId) continue;
+    storyboard.push({
+      id: typeof candidate.id === "string" ? candidate.id : undefined,
+      slotId,
+      title: typeof candidate.title === "string" ? candidate.title : undefined,
+      visual: typeof candidate.visual === "string" ? candidate.visual : undefined,
+      caption: typeof candidate.caption === "string" ? candidate.caption : undefined,
+      reason: typeof candidate.reason === "string" ? candidate.reason : undefined
+    });
+  }
+  return storyboard.length ? storyboard.slice(0, 12) : undefined;
+}
+
 function cleanStringList(value: unknown) {
   if (!Array.isArray(value)) return undefined;
   const items = value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
   return items.length ? items.slice(0, 8) : undefined;
+}
+
+function cleanAssetTypes(value: unknown): AssetType[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const allowed = new Set<AssetType>(["product_closeup", "usage", "comparison", "person", "scene", "text_card", "cover"]);
+  const items = value.filter((item): item is AssetType => typeof item === "string" && allowed.has(item as AssetType));
+  return items.length ? items.slice(0, 4) : undefined;
+}
+
+function cleanNonNegativeNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : undefined;
+}
+
+function cleanUnitNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : undefined;
 }
 
 function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
