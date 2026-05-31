@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
+import { creativeReconstructionSkills } from "@byteproject/shared";
 import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, SampleAnalysis, SourceInput, VideoMetadata } from "@byteproject/shared";
 
 const require = createRequire(import.meta.url);
 const bundledFfmpegPath = require("ffmpeg-static") as string | null;
 const bundledFfprobePath = (require("ffprobe-static") as { path?: string }).path;
+const installerFfmpegPath = (require("@ffmpeg-installer/ffmpeg") as { path?: string }).path;
 const DEFAULT_SECONDS_PER_VISION_FRAME = 4;
 const DEFAULT_MIN_VISION_FRAMES = 4;
 const DEFAULT_MAX_VISION_FRAMES = 16;
@@ -78,25 +80,31 @@ export const videoAnalyzerAdapter: ToolProtocol<
 };
 
 export const remotionStoryboardAdapter: ToolProtocol<
-  { plan: GeneratedPlan; outputDir: string },
+  { plan: GeneratedPlan; outputDir: string; materialVideo?: VideoMetadata },
   { url: string; path: string }
 > = {
   name: "Remotion Storyboard Renderer",
-  inputSchema: "{ plan, outputDir }",
+  inputSchema: "{ plan, outputDir, materialVideo? }",
   outputSchema: "{ url, path }",
   requiredEnv: [],
   filePermissions: ["OUTPUT_DIR"],
-  timeoutMs: 10_000,
-  fallback: "Create an HTML storyboard preview when Remotion renderer is not installed.",
+  timeoutMs: 60_000,
+  fallback: "Create an HTML storyboard preview if MP4 rendering is unavailable.",
   async run(input) {
     await mkdir(input.outputDir, { recursive: true });
-    const fileName = `${input.plan.id}.html`;
-    const outputPath = join(input.outputDir, fileName);
-    await writeFile(outputPath, renderTimelineHtml(input.plan), "utf8");
-    return {
-      path: outputPath,
-      url: `/outputs/${fileName}`
-    };
+    const htmlFileName = `${input.plan.id}.html`;
+    const htmlPath = join(input.outputDir, htmlFileName);
+    await writeFile(htmlPath, renderTimelineHtml(input.plan), "utf8");
+
+    try {
+      const mp4 = await renderTimelineMp4(input.plan, input.outputDir, input.materialVideo);
+      return mp4;
+    } catch {
+      return {
+        path: htmlPath,
+        url: `/outputs/${htmlFileName}`
+      };
+    }
   }
 };
 
@@ -317,6 +325,138 @@ function renderTimelineHtml(plan: GeneratedPlan) {
 </html>`;
 }
 
+async function renderTimelineMp4(plan: GeneratedPlan, outputDir: string, materialVideo?: VideoMetadata) {
+  const ffmpeg = resolveFfmpegPath();
+  const fileName = `${plan.id}.mp4`;
+  const assFileName = `${plan.id}.ass`;
+  const outputPath = join(outputDir, fileName);
+  await writeFile(join(outputDir, assFileName), renderTimelineAss(plan), "utf8");
+  const duration = String(resolvePlanDuration(plan));
+  const videoFilter = [
+    "scale=1080:1920:force_original_aspect_ratio=increase",
+    "crop=1080:1920",
+    "setsar=1",
+    `ass=${assFileName}`
+  ].join(",");
+  const colorFilter = `ass=${assFileName}`;
+  const hasMaterialVideo = Boolean(materialVideo?.localPath);
+  const args = hasMaterialVideo
+    ? [
+        "-y",
+        "-stream_loop",
+        "-1",
+        "-i",
+        materialVideo!.localPath!,
+        "-t",
+        duration,
+        "-vf",
+        videoFilter,
+        "-an",
+        "-r",
+        "30",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        fileName
+      ]
+    : [
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        `color=c=0x111317:s=1080x1920:d=${duration}:r=30`,
+        "-vf",
+        colorFilter,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        fileName
+      ];
+
+  await execJson(ffmpeg, args, { cwd: outputDir });
+  return {
+    path: outputPath,
+    url: `/outputs/${fileName}`
+  };
+}
+
+function renderTimelineAss(plan: GeneratedPlan) {
+  const events = plan.timeline
+    .map((item, index) => {
+      const start = formatAssTime(item.startSec);
+      const end = formatAssTime(item.endSec);
+      const title = `镜头 ${index + 1} · ${segmentTitle(item.slotId)} · ${item.startSec}s-${item.endSec}s`;
+      const caption = item.caption || plan.id;
+      const packaging = [...item.packaging.slice(0, 2), item.transition ? `转场：${item.transition}` : "", item.beatHint ? `节奏：${item.beatHint}` : ""]
+        .filter(Boolean)
+        .join(" / ");
+      return [
+        `Dialogue: 0,${start},${end},Top,,0,0,0,,${assText(title)}`,
+        `Dialogue: 1,${start},${end},Main,,0,0,0,,${assText(caption)}`,
+        packaging ? `Dialogue: 2,${start},${end},Bottom,,0,0,0,,${assText(packaging)}` : ""
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n");
+
+  return `[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Top, Microsoft YaHei, 42, &H00D9FFF7, &H00FFFFFF, &H00101517, &H99000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 8, 72, 72, 96, 1
+Style: Main, Microsoft YaHei, 70, &H00FFFFFF, &H00FFFFFF, &H00101517, &HAA000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 5, 1, 5, 84, 84, 96, 1
+Style: Bottom, Microsoft YaHei, 38, &H00F9E3C1, &H00FFFFFF, &H00101517, &HAA000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 2, 72, 72, 130, 1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+${events}
+`;
+}
+
+function resolvePlanDuration(plan: GeneratedPlan) {
+  const duration = plan.timeline.at(-1)?.endSec ?? plan.previewVariants[0]?.targetDurationSec ?? 18;
+  return Math.max(1, Math.min(60, Number(duration.toFixed(2))));
+}
+
+function formatAssTime(value: number) {
+  const safe = Math.max(0, value);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const seconds = Math.floor(safe % 60);
+  const centiseconds = Math.floor((safe - Math.floor(safe)) * 100);
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(centiseconds).padStart(2, "0")}`;
+}
+
+function assText(value: string) {
+  return value
+    .replace(/[{}]/g, "")
+    .replace(/\r?\n/g, "\\N")
+    .replace(/,/g, "，")
+    .slice(0, 120);
+}
+
+function segmentTitle(slotId: string) {
+  if (/hook/i.test(slotId)) return "Hook";
+  if (/body/i.test(slotId)) return "Body";
+  if (/proof/i.test(slotId)) return "Proof";
+  if (/offer/i.test(slotId)) return "Offer";
+  if (/cta/i.test(slotId)) return "CTA";
+  return "结构槽位";
+}
+
 function buildCreativeMessages(input: ModelEnhancementInput) {
   const source = input.source;
   const slots = input.sample.slots.map((slot) => ({
@@ -350,6 +490,16 @@ function buildCreativeMessages(input: ModelEnhancementInput) {
     intent: atom.intent,
     outputHint: atom.outputHint
   }));
+  const selectedSkillIds = new Set(input.source.creativeSkillIds ?? []);
+  const creativeSkills = creativeReconstructionSkills
+    .filter((skill) => selectedSkillIds.has(skill.id))
+    .map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      remotionUse: skill.remotionUse,
+      hyperframesUse: skill.hyperframesUse,
+      guardrail: skill.guardrail
+    }));
 
   return [
     {
@@ -379,6 +529,7 @@ function buildCreativeMessages(input: ModelEnhancementInput) {
           rationale: ["3 条以内，说明如何迁移结构、如何补缺口"]
         },
         source,
+        creativeSkills,
         sampleSummary: input.sample.summary,
         slots,
         slotMatches: matches,
@@ -550,7 +701,7 @@ function resolveVisionFrameCount(durationSec: number | undefined) {
 }
 
 function resolveFfmpegPath() {
-  return resolveBundledAwareBinary(process.env.FFMPEG_PATH, bundledFfmpegPath, "ffmpeg");
+  return resolveBundledAwareBinary(process.env.FFMPEG_PATH, installerFfmpegPath || bundledFfmpegPath, "ffmpeg");
 }
 
 function resolveFfprobePath() {
@@ -654,9 +805,9 @@ async function safeResponseText(response: Response) {
   return text.slice(0, 500);
 }
 
-function execJson(command: string, args: string[]) {
+function execJson(command: string, args: string[], options: { cwd?: string } = {}) {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true });
+    const child = spawn(command, args, { windowsHide: true, cwd: options.cwd });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {

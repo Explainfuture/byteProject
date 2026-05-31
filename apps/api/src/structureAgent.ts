@@ -3,6 +3,7 @@ import { z } from "zod";
 import { modelCreativeAdapter, modelVideoUnderstandingAdapter, remotionStoryboardAdapter } from "@byteproject/adapters";
 import { analyzeSampleVideo, composePlan, createBriefDrivenTranscript, segmentLongVideo } from "@byteproject/core";
 import { knowledgeStore } from "@byteproject/knowledge";
+import { inferCreativeSkillIds } from "@byteproject/shared";
 import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, RunResult, SampleAnalysis, SourceInput, StructureSlot, VideoMetadata } from "@byteproject/shared";
 
 const creativeStrategySchema = z.enum(["balanced", "high_click", "high_conversion", "high_rhythm", "premium"]);
@@ -81,7 +82,7 @@ type AgentTool = {
 export function normalizeSourceInput(body: unknown): SourceInput {
   const parsed = sourceInputSchema.parse(body);
   const sampleVideoIds = parsed.sampleVideoIds?.length ? parsed.sampleVideoIds : ["sample-mock"];
-  return {
+  const source = {
     sampleVideoIds,
     materialVideoId: parsed.materialVideoId || sampleVideoIds[0],
     prompt: parsed.prompt || "把这段素材重构成一个高转化商品短视频",
@@ -92,6 +93,10 @@ export function normalizeSourceInput(body: unknown): SourceInput {
     targetDurationSec: parsed.targetDurationSec || 18,
     auxiliaryAssetIds: parsed.auxiliaryAssetIds ?? [],
     strategy: parsed.strategy || "balanced"
+  };
+  return {
+    ...source,
+    creativeSkillIds: inferCreativeSkillIds(source)
   };
 }
 
@@ -340,11 +345,11 @@ const agentTools: AgentTool[] = [
     async execute(_input, context) {
       if (!context.generated) throw new Error("compose_video_plan must run before render_preview.");
       addAnalysisRationale(context);
-      const preview = await remotionStoryboardAdapter.run({ plan: context.generated, outputDir: context.outputDir });
+      const preview = await remotionStoryboardAdapter.run({ plan: context.generated, outputDir: context.outputDir, materialVideo: context.materialVideo });
       context.generated.demo = {
         status: "rendered",
         url: preview.url,
-        note: "已生成 Remotion/HTML 预览；可继续接入服务端 MP4 渲染。"
+        note: preview.url.endsWith(".mp4") ? "已自动生成 MP4 成片草稿。" : "已生成 HTML 预览；MP4 渲染不可用时使用该兜底。"
       };
       return { demo: context.generated.demo };
     }
@@ -407,11 +412,11 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
     ...context.generated.compositionPlan.rationale
   ].slice(0, 5);
   addAnalysisRationale(context);
-  const preview = await remotionStoryboardAdapter.run({ plan: context.generated, outputDir: context.outputDir });
+  const preview = await remotionStoryboardAdapter.run({ plan: context.generated, outputDir: context.outputDir, materialVideo: context.materialVideo });
   context.generated.demo = {
     status: "rendered",
     url: preview.url,
-    note: "已生成 Remotion/HTML 预览；可继续接入服务端 MP4 渲染。"
+    note: preview.url.endsWith(".mp4") ? "已自动生成 MP4 成片草稿。" : "已生成 HTML 预览；MP4 渲染不可用时使用该兜底。"
   };
   trace.push({
     tool: "fallback_pipeline",

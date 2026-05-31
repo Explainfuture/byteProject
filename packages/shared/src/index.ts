@@ -1,5 +1,134 @@
 export type CreativeStrategy = "balanced" | "high_click" | "high_conversion" | "high_rhythm" | "premium";
 
+export type CreativeReconstructionSkillId =
+  | "structural_visual_copy_trading"
+  | "ctr_threshold_creative_mining"
+  | "zero_inventory_affiliate_engine"
+  | "semantically_aligned_agentic_interviewing"
+  | "non_destructive_frame_reconstruction";
+
+export type CreativeReconstructionSkill = {
+  id: CreativeReconstructionSkillId;
+  name: string;
+  shortName: string;
+  description: string;
+  remotionUse: string;
+  hyperframesUse: string;
+  guardrail: string;
+};
+
+export const creativeReconstructionSkills: CreativeReconstructionSkill[] = [
+  {
+    id: "structural_visual_copy_trading",
+    name: "Structural Visual Copy-Trading",
+    shortName: "结构代理",
+    description: "拆解参考视频的节奏、光线、镜头角度、情绪触发和 CTA 行为机制，再围绕新产品重建。",
+    remotionUse: "把参考结构转成时间线、字幕卡、镜头节奏和包装层。",
+    hyperframesUse: "把镜头构图、转场节拍和视觉层级转成可复用 frame recipe。",
+    guardrail: "只迁移结构，不复制竞品画面、脚本、品牌、人物、声音或字幕原文。"
+  },
+  {
+    id: "ctr_threshold_creative_mining",
+    name: "CTR-Threshold Creative Mining",
+    shortName: "CTR 采矿",
+    description: "从广告库或内部样例中按市场、垂类、时间窗和点击表现筛选可复用创意模式。",
+    remotionUse: "把高表现模式映射成多个 Remotion 预览赛道和 hook 变体。",
+    hyperframesUse: "把指标筛选出的素材风格转成结构模板候选。",
+    guardrail: "只记录创意模式和指标线索，不下载或搬运未授权广告素材。"
+  },
+  {
+    id: "zero_inventory_affiliate_engine",
+    name: "Zero-Inventory Affiliate Engine",
+    shortName: "联盟样片",
+    description: "用授权商品图、商品 URL 信息和卖点生成产品评测/演示短视频。",
+    remotionUse: "用商品图、卖点卡、使用场景卡和 CTA 拼出本地预览。",
+    hyperframesUse: "生成商品评测镜头 recipe、标题条和 affiliate disclosure 层。",
+    guardrail: "必须保留联盟营销披露，不能虚构亲测、收益、评价或库存信息。"
+  },
+  {
+    id: "semantically_aligned_agentic_interviewing",
+    name: "Semantically Aligned Agentic Interviewing",
+    shortName: "语义访谈",
+    description: "渲染前通过多步访谈锁定商品名、买家人群、三大卖点、语言市场和合规要求。",
+    remotionUse: "把确认后的 brief 写入脚本、字幕和 CTA，减少 one-shot 偏题。",
+    hyperframesUse: "先生成结构化 brief，再让 HyperFrames 生成稳定画面组合。",
+    guardrail: "缺少关键信息时先提问或标注假设，不让模型自由猜品牌语气。"
+  },
+  {
+    id: "non_destructive_frame_reconstruction",
+    name: "Non-Destructive Frame Reconstruction",
+    shortName: "非破坏重构",
+    description: "按参考画面的构图和运动逻辑重建新场景，而不是把产品粗暴贴到原视频上。",
+    remotionUse: "用独立字幕层、卖点卡、背景和镜头运动重建画面表达。",
+    hyperframesUse: "生成从零重建的 frame recipe，包括背景、手部、阴影、反光和品牌色。",
+    guardrail: "不做未授权 face swap、voice clone、静态遮罩贴图或源帧直接复用。"
+  }
+];
+
+type CreativeSkillSignalInput = Partial<{
+  prompt: string;
+  productName: string;
+  sellingPoints: string[];
+  targetAudience: string;
+  tone: string;
+  strategy: CreativeStrategy;
+}>;
+
+export function inferCreativeSkillIds(input: CreativeSkillSignalInput): CreativeReconstructionSkillId[] {
+  const text = [
+    input.prompt,
+    input.productName,
+    input.targetAudience,
+    input.tone,
+    ...(input.sellingPoints ?? [])
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  const hasAny = (keywords: string[]) => keywords.some((keyword) => text.includes(keyword.toLowerCase()));
+  const hasProductBrief = Boolean(input.productName?.trim() || input.sellingPoints?.some((item) => item.trim()));
+  const missingBriefDetail = !input.productName?.trim() || !input.sellingPoints?.length || !input.targetAudience?.trim();
+  const scores: Record<CreativeReconstructionSkillId, number> = {
+    structural_visual_copy_trading: 3,
+    ctr_threshold_creative_mining: 0,
+    zero_inventory_affiliate_engine: 0,
+    semantically_aligned_agentic_interviewing: 0,
+    non_destructive_frame_reconstruction: 2.5
+  };
+
+  if (hasAny(["迁移", "重构", "参考", "样例", "不复制", "原片", "画面", "构图", "镜头", "运动"])) {
+    scores.non_destructive_frame_reconstruction += 1;
+  }
+  if (hasProductBrief || hasAny(["商品", "产品", "卖点", "电商", "种草", "测评", "带货", "affiliate", "联盟", "购买", "cta"])) {
+    scores.zero_inventory_affiliate_engine += 2.5;
+  }
+  if (hasAny(["爆款", "高点击", "ctr", "点击", "hook", "开头", "快切", "卡点", "节奏", "广告", "投放", "转化"])) {
+    scores.ctr_threshold_creative_mining += 2.5;
+  }
+  if (missingBriefDetail || hasAny(["不确定", "帮我", "自动", "一句话", "需求", "brief", "用户"])) {
+    scores.semantically_aligned_agentic_interviewing += 2.25;
+  }
+
+  if (input.strategy === "high_click" || input.strategy === "high_rhythm") {
+    scores.ctr_threshold_creative_mining += 1.5;
+  }
+  if (input.strategy === "high_conversion") {
+    scores.ctr_threshold_creative_mining += 1;
+    scores.zero_inventory_affiliate_engine += 1;
+  }
+  if (input.strategy === "premium") {
+    scores.non_destructive_frame_reconstruction += 1;
+    scores.semantically_aligned_agentic_interviewing += 0.75;
+  }
+
+  const priority = creativeReconstructionSkills.map((skill) => skill.id);
+  const ranked = priority
+    .slice()
+    .sort((a, b) => scores[b] - scores[a] || priority.indexOf(a) - priority.indexOf(b));
+  const selected = ranked.filter((id) => scores[id] >= 2).slice(0, 4);
+  return selected.length >= 3 ? selected : ranked.slice(0, 3);
+}
+
 export type VideoStyleTrack =
   | "ecommerce_burst"
   | "review_contrast"
@@ -36,6 +165,7 @@ export type SourceInput = {
   targetAudience: string;
   tone: string;
   targetDurationSec: number;
+  creativeSkillIds: CreativeReconstructionSkillId[];
   auxiliaryAssetIds: string[];
   strategy: CreativeStrategy;
 };

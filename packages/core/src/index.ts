@@ -1,4 +1,5 @@
 import { knowledgeStore } from "@byteproject/knowledge";
+import { creativeReconstructionSkills, inferCreativeSkillIds } from "@byteproject/shared";
 import type {
   AssetType,
   CompositionPlan,
@@ -342,6 +343,7 @@ export function composePlan(input: {
     slotMatches: matches,
     rationale: [
       "从样例中迁移结构原子，而不是复用样例内容。",
+      `可用创意技能：${selectedCreativeSkills(input.source).map((skill) => skill.shortName).join(" / ") || "未指定，按基础结构迁移执行"}。`,
       "上传视频会先抽帧并粗分成候选画面，再评估各结构槽位的支撑度。",
       "缺口使用文案、包装卡片和素材复用补全。"
     ]
@@ -425,6 +427,7 @@ function buildPreviewVariants(source: SourceInput, timeline: TimelineItem[]): Pr
 }
 
 function buildRendererPrompt(source: SourceInput, script: string, timeline: TimelineItem[], variants: PreviewVariant[]) {
+  const skills = selectedCreativeSkills(source);
   return JSON.stringify({
     task: "Generate local Remotion or Hyperframes preview compositions from the transferred structure.",
     constraints: {
@@ -442,6 +445,13 @@ function buildRendererPrompt(source: SourceInput, script: string, timeline: Time
       tone: source.tone,
       strategy: source.strategy
     },
+    creativeSkills: skills.map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      remotionUse: skill.remotionUse,
+      hyperframesUse: skill.hyperframesUse,
+      guardrail: skill.guardrail
+    })),
     script,
     timeline,
     previewVariants: variants.map((variant) => ({
@@ -451,6 +461,11 @@ function buildRendererPrompt(source: SourceInput, script: string, timeline: Time
       promptHint: variant.promptHint
     }))
   });
+}
+
+function selectedCreativeSkills(source: SourceInput) {
+  const selected = new Set(source.creativeSkillIds ?? []);
+  return creativeReconstructionSkills.filter((skill) => selected.has(skill.id));
 }
 
 function captionForSlot(slot: StructureSlot, source: SourceInput, match?: SlotMatch) {
@@ -492,7 +507,7 @@ function buildScript(source: SourceInput, slots: StructureSlot[], matches: SlotM
 export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
   const sampleVideo = createMockVideo("sample", "爆款样例.mp4");
   const materialVideo: VideoMetadata = { ...sampleVideo, role: "material" };
-  const fullSource: SourceInput = {
+  const sourceWithDefaults = {
     sampleVideoIds: [sampleVideo.id],
     materialVideoId: materialVideo.id,
     prompt: source?.prompt ?? "把这段素材重构成高转化商品短视频",
@@ -503,6 +518,10 @@ export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
     targetDurationSec: source?.targetDurationSec ?? 18,
     auxiliaryAssetIds: source?.auxiliaryAssetIds ?? [],
     strategy: source?.strategy ?? "balanced"
+  };
+  const fullSource: SourceInput = {
+    ...sourceWithDefaults,
+    creativeSkillIds: source?.creativeSkillIds ?? inferCreativeSkillIds(sourceWithDefaults)
   };
 
   const sample = analyzeSampleVideo(sampleVideo, createMockTranscript(fullSource.productName), { persist: false });

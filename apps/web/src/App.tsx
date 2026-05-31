@@ -22,7 +22,8 @@ import {
   Wand2
 } from "lucide-react";
 import { Player } from "@remotion/player";
-import type { CreativeStrategy, PreviewVariant, RunResult, SlotMatch, StructureSlot, TimelineItem, VideoStyleTrack } from "@byteproject/shared";
+import { creativeReconstructionSkills, inferCreativeSkillIds } from "@byteproject/shared";
+import type { CreativeReconstructionSkillId, CreativeStrategy, RunResult, SlotMatch, StructureSlot, TimelineItem, VideoStyleTrack } from "@byteproject/shared";
 import {
   MarketingFakeVideo,
   REMOTION_FAKE_VIDEO_FPS,
@@ -32,9 +33,9 @@ import {
 } from "./remotion/FakeStructureVideos";
 
 type UploadRole = "sample";
-type AppScreen = "start" | "progress" | "result";
+type AppScreen = "start" | "result";
 type ResultTab = "demo" | "structure" | "gaps" | "timeline" | "packaging" | "versions";
-type UploadedVideo = { id: string; name: string; previewUrl: string; posterUrl?: string };
+type UploadedVideo = { id: string; name: string; previewUrl?: string; posterUrl?: string; templateTrack?: VideoStyleTrack };
 type VideoOrientation = "landscape" | "portrait" | "square" | "unknown";
 type AgentTraceItem = { tool: string; ok: boolean; input: unknown; observation: unknown };
 type AgentRunResult = RunResult & { agentTrace?: AgentTraceItem[]; agentMode?: "tool-calling" | "fallback" };
@@ -63,12 +64,18 @@ type AppForm = {
   visualStyle: string;
 };
 
+type StartValidationErrors = {
+  sampleVideo?: string;
+  prompt?: string;
+};
+
 type StructureSkillPreset = {
   id: string;
   name: string;
   kind: string;
   decision: string;
   detail: string;
+  track: VideoStyleTrack;
   form: AppForm;
 };
 
@@ -101,6 +108,7 @@ const visualStyleOptions = ["清爽产品感", "生活方式感", "科技质感"
 const MIN_PREVIEW_FRAME_COUNT = 4;
 const MAX_PREVIEW_FRAME_COUNT = 16;
 const SECONDS_PER_PREVIEW_FRAME = 4;
+const defaultResultTab: ResultTab = "demo";
 
 const defaultForm: AppForm = {
   prompt: "",
@@ -125,6 +133,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "营销类",
     decision: "快节奏，高转化",
     detail: "AI 会重点分析开头 Hook、镜头切换频率、字幕密度、卖点推进和缺口补全方式。",
+    track: "ecommerce_burst",
     form: {
       prompt:
         "迁移样例的开头吸引、镜头切换频率、字幕密度和卖点推进方式，生成一条电商爆品短视频。优先拆出商品特写、使用过程、对比证明、结尾 CTA 这些结构槽位；素材不足时，用标题条、卖点卡片、局部放大、重复裁切和字幕补全完成表达，不复制原片内容。",
@@ -148,6 +157,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "剪辑类",
     decision: "适合种草和评测",
     detail: "AI 会重点分析反差开场、问题展示、对比证明、卖点总结和结尾推荐。",
+    track: "review_contrast",
     form: {
       prompt:
         "把样例拆成测评短视频结构：反差开场、问题展示、对比证明、卖点总结、行动引导。新视频要优先匹配开箱、细节、使用、对比、结尾推荐这些镜头；缺少对比画面时，用分屏卡片、字幕对照、局部放大和时间线重排补全。",
@@ -171,6 +181,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "剪辑类",
     decision: "适合讲解和口播",
     detail: "AI 会重点分析 Hook-Body-CTA、逐字字幕、关键词强调和自然语言改片空间。",
+    track: "talking_head_knowledge",
     form: {
       prompt:
         "迁移样例的口播逻辑，而不是照搬内容：先提出痛点问题，再用 3 个层次解释方法，中段用字幕强调关键词，结尾给出评论互动或行动建议。素材不足时，用字幕、标题条、强调贴纸和轻量转场补足信息。",
@@ -194,6 +205,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "Motion Graph",
     decision: "低素材也能成片",
     detail: "AI 会重点分析图文包装、卡点转场、标题条、卖点卡片和可解释的工具调用过程。",
+    track: "motion_graph_explainer",
     form: {
       prompt:
         "把样例抽象成 MG 信息流结构：概念开场、流程拆解、能力分层、结果对比、结尾 CTA。新视频允许用标题条、卖点卡片、图标贴纸、背景图和转场补全画面，重点展示结构迁移过程和工具调用可解释性。",
@@ -217,6 +229,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "营销类",
     decision: "痛点到咨询",
     detail: "AI 会重点分析行业痛点、能力拆解、价值证明、客户收益和咨询 CTA。",
+    track: "b2b_marketing",
     form: {
       prompt:
         "把样例迁移成 B 端营销短视频：先指出业务痛点，再拆解解决方案能力，中段用数据感包装和场景证明增强可信度，最后引导咨询。素材不足时，用图文卡片、流程条、局部放大和字幕补全表达。",
@@ -240,6 +253,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "Vlog",
     decision: "场景代入",
     detail: "AI 会重点分析日常场景、自然转场、轻字幕、情绪递进和生活方式包装。",
+    track: "vlog_lifestyle",
     form: {
       prompt:
         "把样例迁移成生活方式 Vlog：从真实场景开场，保留自然节奏，中段用几个生活片段承接卖点，结尾轻提示收藏或互动。不要做硬广，弱素材用字幕卡、场景标签和镜头重排补足。",
@@ -263,6 +277,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "营销类",
     decision: "强利益点",
     detail: "AI 会重点分析优惠前置、倒计时节奏、利益点卡片和强 CTA 收口。",
+    track: "event_promo",
     form: {
       prompt:
         "把样例迁移成活动促销短视频：开头直接给利益点，中段展示商品/服务优势，加入倒计时、限时、福利卡片和明确 CTA。素材不足时，用标题条、价格/福利卡片和重复裁切补全。",
@@ -286,6 +301,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "教程类",
     decision: "步骤清楚",
     detail: "AI 会重点分析操作步骤、序号字幕、关键帧说明和总结卡片。",
+    track: "tutorial_steps",
     form: {
       prompt:
         "把样例迁移成教程步骤短视频：开头说明结果，中段拆成 3-5 个步骤，每步配清晰字幕和操作镜头，结尾总结注意事项。素材不足时，用序号卡片、局部放大和暂停强调补全。",
@@ -309,6 +325,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "品牌类",
     decision: "慢节奏，高质感",
     detail: "AI 会重点分析留白、慢镜头、少字幕、品牌收束和高质感包装。",
+    track: "premium_brand",
     form: {
       prompt:
         "把样例迁移成品牌质感短视频：减少信息堆叠，保留慢节奏镜头和留白，重点展示材质、场景和品牌调性。包装使用少量标题、细线标签和干净转场，不复制原片视觉元素。",
@@ -332,6 +349,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     kind: "剪辑类",
     decision: "节拍驱动",
     detail: "AI 会重点分析音乐卡点、转场密度、速度变化、字幕节奏和情绪递进。",
+    track: "cutting_beat",
     form: {
       prompt:
         "把样例迁移成剪辑卡点短视频：优先分析切点、转场、节拍、速度变化和字幕出现时机。新视频要用短镜头、卡点字幕、局部放大和节奏递进组合成完整成片。",
@@ -354,13 +372,13 @@ const structureSkillPresets: StructureSkillPreset[] = [
 export function App() {
   const [result, setResult] = useState<AgentRunResult | null>(null);
   const [screen, setScreen] = useState<AppScreen>("start");
-  const [activeTab, setActiveTab] = useState<ResultTab>("demo");
+  const [activeTab, setActiveTabState] = useState<ResultTab>(() => readResultTabFromUrl());
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [progressIndex, setProgressIndex] = useState(0);
   const [sampleVideo, setSampleVideo] = useState<UploadedVideo | null>(null);
   const [revisionPrompt, setRevisionPrompt] = useState("");
   const [form, setForm] = useState<AppForm>(defaultForm);
+  const [startValidationErrors, setStartValidationErrors] = useState<StartValidationErrors>({});
   const [agentTurns, setAgentTurns] = useState<AgentTurn[]>([]);
   const [, startTransition] = useTransition();
 
@@ -369,18 +387,54 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (screen !== "progress") return undefined;
-    setProgressIndex(0);
-    const interval = window.setInterval(() => {
-      setProgressIndex((current) => Math.min(current + 1, progressSteps.length - 2));
-    }, 430);
-    return () => window.clearInterval(interval);
-  }, [screen]);
+    const handlePopState = () => setActiveTabState(readResultTabFromUrl());
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (!sampleVideo) return;
+    setStartValidationErrors((current) => {
+      if (!current.sampleVideo) return current;
+      const next = { ...current };
+      delete next.sampleVideo;
+      return next;
+    });
+  }, [sampleVideo]);
+
+  useEffect(() => {
+    if (!form.prompt.trim()) return;
+    setStartValidationErrors((current) => {
+      if (!current.prompt) return current;
+      const next = { ...current };
+      delete next.prompt;
+      return next;
+    });
+  }, [form.prompt]);
 
   const slots = result?.samples[0]?.slots ?? [];
   const matches = result?.generated.compositionPlan.slotMatches ?? [];
   const totalDuration = result?.generated.timeline.at(-1)?.endSec ?? form.targetDurationSec;
   const hasUploadedInputs = Boolean(sampleVideo?.id);
+
+  function setActiveTab(tab: ResultTab) {
+    setActiveTabState(tab);
+    const url = new URL(window.location.href);
+    if (tab === defaultResultTab) {
+      url.searchParams.delete("tab");
+    } else {
+      url.searchParams.set("tab", tab);
+    }
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+
+  function validateStartInputs() {
+    const nextErrors: StartValidationErrors = {};
+    if (!sampleVideo?.id) nextErrors.sampleVideo = "先上传一条样例视频。";
+    if (!form.prompt.trim()) nextErrors.prompt = "写一句迁移目标，Agent 才能生成新视频方向。";
+    setStartValidationErrors(nextErrors);
+    return Object.keys(nextErrors).length === 0;
+  }
 
   useEffect(() => {
     return () => {
@@ -395,7 +449,7 @@ export function App() {
     startTransition(() => {
       setResult(data);
       setScreen("start");
-      setActiveTab("demo");
+      setActiveTab(defaultResultTab);
       setIsLoading(false);
     });
   }
@@ -422,8 +476,25 @@ export function App() {
     });
   }
 
-  async function generate(extraInstruction?: string) {
+  function selectTemplateVideo(preset: StructureSkillPreset) {
+    setForm(preset.form);
+    setSampleVideo((previous) => {
+      if (previous?.previewUrl) URL.revokeObjectURL(previous.previewUrl);
+      return {
+        id: `template-${preset.id}`,
+        name: `${preset.name} 本地示例`,
+        templateTrack: preset.track
+      };
+    });
+  }
+
+  async function generate(extraInstruction?: string, options?: { requireStartInputs?: boolean }) {
     if (!result || isGenerating) return;
+    if (options?.requireStartInputs && !validateStartInputs()) {
+      setScreen("start");
+      return;
+    }
+    setStartValidationErrors({});
     const visiblePrompt = (extraInstruction?.trim() || form.prompt.trim() || "请根据上传视频生成短视频方案").trim();
     const turnId = `${Date.now()}`;
     setAgentTurns((current) => {
@@ -431,9 +502,11 @@ export function App() {
       return extraInstruction?.trim() ? [...current, nextTurn] : [nextTurn];
     });
     setIsGenerating(true);
-    setScreen("progress");
-    setProgressIndex(0);
+    setScreen("result");
+    if (!extraInstruction?.trim()) setActiveTab("demo");
 
+    const sellingPoints = splitSellingPoints(form.sellingPoints);
+    const inferredCreativeSkillIds = inferCreativeSkillIds({ ...form, sellingPoints });
     const settingPrompt = [
       `开头方式：${form.hookStyle}`,
       `画幅：${form.aspectRatio}`,
@@ -441,6 +514,7 @@ export function App() {
       `节奏：${form.rhythm}`,
       `收口：${form.ctaStyle}`,
       `视觉风格：${form.visualStyle}`,
+      `Agent 自动选择技能：${selectedCreativeSkillNames(inferredCreativeSkillIds).join(" / ")}`,
       `本地预览：生成 10 个 Remotion/Hyperframes 风格赛道，单条不超过 60 秒，抽帧保持 4-16 张中等预算`
     ].join("\n");
     const basePrompt = `${form.prompt}\n\n视频期望参数：\n${settingPrompt}`;
@@ -449,7 +523,7 @@ export function App() {
       sampleVideoIds: [sampleVideo?.id ?? "sample-mock"],
       prompt: finalPrompt,
       productName: form.productName,
-      sellingPoints: form.sellingPoints.split("\n").map((item) => item.trim()).filter(Boolean),
+      sellingPoints,
       targetAudience: form.targetAudience,
       tone: form.tone,
       targetDurationSec: form.targetDurationSec,
@@ -471,8 +545,6 @@ export function App() {
       setAgentTurns((current) =>
         current.map((turn) => (turn.id === turnId ? { ...turn, status: "done", result: data } : turn))
       );
-      setProgressIndex(progressSteps.length - 1);
-      setActiveTab("demo");
       setScreen("result");
       setIsGenerating(false);
       setRevisionPrompt("");
@@ -504,15 +576,15 @@ export function App() {
         <StartScreen
           form={form}
           setForm={setForm}
+          validationErrors={startValidationErrors}
           sampleVideo={sampleVideo}
           canGenerate={hasUploadedInputs && Boolean(form.prompt.trim())}
           onUpload={uploadVideo}
-          onGenerate={() => generate()}
+          onSelectTemplate={selectTemplateVideo}
+          onGenerate={() => generate(undefined, { requireStartInputs: true })}
           isGenerating={isGenerating}
         />
       ) : null}
-
-      {screen === "progress" ? <ProgressScreen currentIndex={progressIndex} activeTurn={agentTurns.at(-1)} sampleVideo={sampleVideo} /> : null}
 
       {screen === "result" ? (
         <ResultWorkspace
@@ -539,9 +611,11 @@ export function App() {
 function StartScreen(props: {
   form: AppForm;
   setForm: (form: AppForm) => void;
+  validationErrors: StartValidationErrors;
   sampleVideo: UploadedVideo | null;
   canGenerate: boolean;
   onUpload: (file: File, role: UploadRole) => Promise<void>;
+  onSelectTemplate: (preset: StructureSkillPreset) => void;
   onGenerate: () => void;
   isGenerating: boolean;
 }) {
@@ -566,7 +640,7 @@ function StartScreen(props: {
           <section className="workspace-panel input-panel" aria-label="素材输入区">
             <SectionHeading eyebrow="01 Video" title="单视频输入" note="上传样例或评测素材，系统按中等抽帧预算拆解可迁移结构。" />
             <div className="upload-list">
-              <UploadAction role="sample" label="上传视频" hint="选择视频文件" video={props.sampleVideo} onFile={props.onUpload} />
+              <UploadAction role="sample" label="上传视频" hint="选择视频文件" video={props.sampleVideo} onFile={props.onUpload} error={props.validationErrors.sampleVideo} />
             </div>
             <div className="video-preview-grid">
               <VideoPreview
@@ -594,12 +668,13 @@ function StartScreen(props: {
               <span className={props.sampleVideo ? "ready" : ""}>{props.sampleVideo ? "视频已就绪" : "等待视频"}</span>
               <span className={props.sampleVideo ? "ready" : ""}>{props.sampleVideo ? "可开始抽帧拆解" : "等待抽帧"}</span>
             </div>
+            {!props.sampleVideo ? <TemplateVideoLibrary onSelect={props.onSelectTemplate} /> : null}
           </section>
 
           <section className="workspace-panel intent-panel" aria-label="AI 拆解与创作目标区">
-            <SectionHeading eyebrow="02 Brief" title="迁移目标" note="选择一个风格赛道，再让 AI 把抽帧结构迁移成新脚本。" />
-            <SkillPresetDeck form={props.form} setForm={props.setForm} />
-            <SettingsPanel form={props.form} setForm={props.setForm} />
+            <SectionHeading eyebrow="02 Brief" title="迁移目标" note="告诉 Agent 要把上传或示例视频迁移成什么成片方向。" />
+            <AutoCreativeSkillPanel form={props.form} />
+            <SettingsPanel form={props.form} setForm={props.setForm} errors={props.validationErrors} />
           </section>
 
           <aside className="workspace-panel control-panel" aria-label="生成控制区">
@@ -616,8 +691,8 @@ function StartScreen(props: {
             </details>
             <GenerationControls form={props.form} setForm={props.setForm} />
             <div className="control-footer">
-              <p>{props.canGenerate ? "生成脚本结构、镜头节奏表和迁移版创作方案。" : "上传视频后生成脚本结构、镜头节奏表和迁移方案。"}</p>
-              <button type="button" className="start-button" aria-label="开始 AI 拆解并生成方案" onClick={props.onGenerate} disabled={props.isGenerating || !props.canGenerate}>
+              <p>{props.canGenerate ? "生成脚本结构、镜头节奏表和迁移版创作方案。" : "点击后会标出还缺的视频或迁移目标。"}</p>
+              <button type="button" className="start-button" aria-label="开始 AI 拆解并生成方案" onClick={props.onGenerate} disabled={props.isGenerating}>
                 {props.isGenerating ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Wand2 size={18} aria-hidden="true" />}
                 开始 AI 拆解并生成方案
               </button>
@@ -649,30 +724,88 @@ function WorkflowStep(props: { index: number; label: string; state: "done" | "ac
   );
 }
 
-function SkillPresetDeck(props: { form: AppForm; setForm: (form: AppForm) => void }) {
-  const activeSkill = structureSkillPresets.find((preset) => preset.form.prompt === props.form.prompt);
+function TemplateVideoLibrary(props: { onSelect: (preset: StructureSkillPreset) => void }) {
   return (
-    <div className="skill-preset-deck" aria-label="结构技能库">
+    <section className="template-video-library" aria-label="本地示例视频库">
+      <div className="template-library-head">
+        <span>没有本地视频？</span>
+        <strong>选择一条示例素材进入上传流程</strong>
+      </div>
+      <div className="skill-preset-deck template-video-deck">
       {structureSkillPresets.map((preset) => (
         <button
           key={preset.id}
           type="button"
-          className={activeSkill?.id === preset.id ? "active" : ""}
           title={preset.detail}
           data-tooltip={preset.detail}
-          onClick={() => props.setForm(preset.form)}
+          onClick={() => props.onSelect(preset)}
         >
+          <TemplateSamplePlayer preset={preset} />
           <span>{preset.kind}</span>
           <strong>{preset.name}</strong>
-          <small>{preset.decision}</small>
+          <small>{preset.decision} · 点击使用</small>
         </button>
       ))}
+      </div>
+    </section>
+  );
+}
+
+function TemplateSamplePlayer(props: { preset: StructureSkillPreset }) {
+  const points = splitSellingPoints(props.preset.form.sellingPoints);
+  return (
+    <div className="template-sample-player" aria-hidden="true">
+      <Player
+        component={MarketingFakeVideo}
+        durationInFrames={Math.max(1, Math.round(Math.min(60, props.preset.form.targetDurationSec) * REMOTION_FAKE_VIDEO_FPS))}
+        fps={REMOTION_FAKE_VIDEO_FPS}
+        compositionWidth={REMOTION_FAKE_VIDEO_WIDTH}
+        compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
+        inputProps={{
+          productName: props.preset.form.productName,
+          points,
+          audience: props.preset.form.targetAudience,
+          variant: props.preset.track as FakeVideoVariant
+        }}
+        loop
+        autoPlay
+        initialFrame={36}
+        initiallyMuted
+        style={{ width: "100%" }}
+      />
     </div>
   );
 }
 
-function SettingsPanel(props: { form: AppForm; setForm: (form: AppForm) => void }) {
+function AutoCreativeSkillPanel(props: { form: AppForm }) {
+  const selected = new Set(inferCreativeSkillIds({ ...props.form, sellingPoints: splitSellingPoints(props.form.sellingPoints) }));
+
+  return (
+    <section className="creative-skill-selector" aria-label="Agent 自动选择 SKU">
+      <div className="skill-selector-head">
+        <span>Agent 自动选择 SKU</span>
+        <strong>{selected.size} 个已匹配</strong>
+      </div>
+      <div className="creative-skill-grid">
+        {creativeReconstructionSkills.filter((skill) => selected.has(skill.id)).map((skill) => (
+          <article
+            key={skill.id}
+            className="auto-skill-card active"
+            title={skill.guardrail}
+          >
+            <strong>{skill.shortName}</strong>
+            <span>{skill.name}</span>
+            <small>{skill.description}</small>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SettingsPanel(props: { form: AppForm; setForm: (form: AppForm) => void; errors?: StartValidationErrors }) {
   const { form, setForm } = props;
+  const promptError = props.errors?.prompt;
   return (
     <div className="settings-stack">
       <label className="prompt-composer" htmlFor="targetPrompt">
@@ -681,10 +814,13 @@ function SettingsPanel(props: { form: AppForm; setForm: (form: AppForm) => void 
           id="targetPrompt"
           name="targetPrompt"
           autoComplete="off"
+          aria-invalid={Boolean(promptError)}
+          aria-describedby={promptError ? "targetPrompt-error" : undefined}
           placeholder="例如：把这个机器人飞行视频，改成一条适合智能穿戴新品发布的短视频。"
           value={form.prompt}
           onChange={(event) => setForm({ ...form, prompt: event.target.value })}
         />
+        {promptError ? <p id="targetPrompt-error" className="field-error" role="alert">{promptError}</p> : null}
       </label>
 
       <details className="brief-details">
@@ -827,30 +963,36 @@ function OptionChips(props: { label: string; value: string; options: string[]; o
   );
 }
 
-function UploadAction(props: { role: UploadRole; label: string; hint: string; video: UploadedVideo | null; onFile: (file: File, role: UploadRole) => Promise<void> }) {
+function UploadAction(props: { role: UploadRole; label: string; hint: string; video: UploadedVideo | null; onFile: (file: File, role: UploadRole) => Promise<void>; error?: string }) {
   const [busy, setBusy] = useState(false);
   const inputId = `${props.role}-video`;
+  const errorId = `${inputId}-error`;
   return (
-    <label className="upload-action" htmlFor={inputId}>
-      <input
-        id={inputId}
-        name={inputId}
-        type="file"
-        accept="video/*"
-        onChange={async (event) => {
-          const file = event.target.files?.[0];
-          if (!file) return;
-          setBusy(true);
-          await props.onFile(file, props.role);
-          setBusy(false);
-        }}
-      />
-      <span className="upload-action-icon">{busy ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Upload size={18} aria-hidden="true" />}</span>
-      <span>
-        <strong>{props.label}</strong>
-        <small>{busy ? "上传分析中…" : props.video?.name ?? props.hint}</small>
-      </span>
-    </label>
+    <div className="upload-field">
+      <label className="upload-action" htmlFor={inputId}>
+        <input
+          id={inputId}
+          name={inputId}
+          type="file"
+          accept="video/*"
+          aria-invalid={Boolean(props.error)}
+          aria-describedby={props.error ? errorId : undefined}
+          onChange={async (event) => {
+            const file = event.target.files?.[0];
+            if (!file) return;
+            setBusy(true);
+            await props.onFile(file, props.role);
+            setBusy(false);
+          }}
+        />
+        <span className="upload-action-icon">{busy ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Upload size={18} aria-hidden="true" />}</span>
+        <span>
+          <strong>{props.label}</strong>
+          <small>{busy ? "上传分析中…" : props.video?.name ?? props.hint}</small>
+        </span>
+      </label>
+      {props.error ? <p id={errorId} className="field-error" role="alert">{props.error}</p> : null}
+    </div>
   );
 }
 
@@ -861,7 +1003,9 @@ function VideoPreview(props: { title: string; video: UploadedVideo | null; empty
         <FileVideo2 size={16} aria-hidden="true" />
         <span>{props.title}</span>
       </div>
-      {props.video ? (
+      {props.video?.templateTrack ? (
+        <TemplatePreviewPlayer video={props.video} />
+      ) : hasPreviewUrl(props.video) ? (
         <AdaptiveVideoPlayer video={props.video} title={props.title} variant="inline" />
       ) : (
         <div className="preview-empty">
@@ -879,49 +1023,29 @@ function VideoPreview(props: { title: string; video: UploadedVideo | null; empty
   );
 }
 
-function ProgressScreen(props: { currentIndex: number; activeTurn?: AgentTurn; sampleVideo: UploadedVideo | null }) {
-  const liveSteps = buildLiveAgentSteps(props.currentIndex, props.sampleVideo);
+function TemplatePreviewPlayer(props: { video: UploadedVideo }) {
   return (
-    <section className="progress-screen" aria-labelledby="progress-title" aria-live="polite">
-      <div className="progress-card">
-        <span className="product-mark">自动创作链路</span>
-        <h1 id="progress-title">正在分析样例视频</h1>
-        <div className="progress-thread" aria-label="Agent 分析过程">
-          <div className="chat-row user">
-            <div className="agent-bubble user-bubble">
-              <span>USER</span>
-              <p>{props.activeTurn?.prompt || "请根据上传视频生成短视频方案"}</p>
-            </div>
-          </div>
-          <div className="chat-row ai">
-            <div className="agent-avatar" aria-hidden="true">
-              <Bot size={16} />
-            </div>
-            <div className="agent-bubble ai-bubble">
-              <span>VIDEO AGENT</span>
-              <p>收到。开始按视频 Agent 工具链处理：先抽帧，再请求 Doubao-Seed-2.0-lite 视觉分析，最后生成可编辑方案。</p>
-            </div>
-          </div>
-          <div className="agent-tool-stack compact">
-            <AgentToolCall step={currentAgentToolStep(liveSteps)} />
-          </div>
-        </div>
-        <div className="progress-steps">
-          {progressSteps.map((step, index) => {
-            const isDone = index < props.currentIndex;
-            const isActive = index === props.currentIndex;
-            return (
-              <div key={step} className={`progress-step ${isDone ? "done" : ""} ${isActive ? "active" : ""}`}>
-                <span className="step-status">
-                  {isDone ? <CheckCircle2 size={17} aria-hidden="true" /> : isActive ? <Loader2 className="spin" size={17} aria-hidden="true" /> : null}
-                </span>
-                <strong>{step}</strong>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </section>
+    <div className="template-preview-frame">
+      <Player
+        component={MarketingFakeVideo}
+        durationInFrames={Math.round(18 * REMOTION_FAKE_VIDEO_FPS)}
+        fps={REMOTION_FAKE_VIDEO_FPS}
+        compositionWidth={REMOTION_FAKE_VIDEO_WIDTH}
+        compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
+        inputProps={{
+          productName: props.video.name.replace(" 本地示例", ""),
+          points: ["本地示例素材", "可直接进入 Agent 流", "生成 MP4 草稿"],
+          audience: "参赛演示",
+          variant: props.video.templateTrack as FakeVideoVariant
+        }}
+        controls
+        loop
+        initialFrame={36}
+        initiallyMuted
+        showVolumeControls={false}
+        style={{ width: "100%" }}
+      />
+    </div>
   );
 }
 
@@ -962,14 +1086,20 @@ function ResultWorkspace(props: {
       <div className="result-layout">
         <nav className="result-nav" aria-label="结果导航">
           {resultTabs.map((tab) => (
-            <button key={tab.value} type="button" className={props.activeTab === tab.value ? "active" : ""} onClick={() => props.setActiveTab(tab.value)}>
+            <button
+              key={tab.value}
+              type="button"
+              className={props.activeTab === tab.value ? "active" : ""}
+              aria-current={props.activeTab === tab.value ? "page" : undefined}
+              onClick={() => props.setActiveTab(tab.value)}
+            >
               {tab.icon}
               <span>{tab.label}</span>
             </button>
           ))}
         </nav>
 
-        <main className="result-stage">
+        <section className="result-stage" aria-label="结果内容">
           {props.activeTab === "demo" ? (
             <DemoPanel result={props.result} totalDuration={props.totalDuration} sampleVideo={props.sampleVideo} setActiveTab={props.setActiveTab} />
           ) : null}
@@ -978,7 +1108,7 @@ function ResultWorkspace(props: {
           {props.activeTab === "timeline" ? <TimelineEditor items={props.result.generated.timeline} /> : null}
           {props.activeTab === "packaging" ? <PackagingPanel result={props.result} /> : null}
           {props.activeTab === "versions" ? <VersionCards activeStrategy={props.result.generated.compositionPlan.strategy} /> : null}
-        </main>
+        </section>
 
         <aside className="preview-aside agent-aside">
           <VideoAgentPanel
@@ -997,49 +1127,20 @@ function ResultWorkspace(props: {
 }
 
 function DemoPanel(props: { result: RunResult; totalDuration: number; sampleVideo: UploadedVideo | null; setActiveTab: (tab: ResultTab) => void }) {
-  const previewVariants = props.result.generated.previewVariants?.length
-    ? props.result.generated.previewVariants
-    : fallbackPreviewVariants(props.result.source.targetDurationSec);
-  const playerProps = {
-    productName: props.result.source.productName,
-    points: props.result.source.sellingPoints,
-    audience: props.result.source.targetAudience
-  };
+  const generatedVideoUrl = props.result.generated.demo.url?.endsWith(".mp4") ? props.result.generated.demo.url : undefined;
 
   return (
     <section className="demo-panel" aria-labelledby="demo-title">
       <div className="demo-video">
-        <div className="demo-video-head">
-          <span>{props.totalDuration}s</span>
-          <strong>10 个本地预览赛道</strong>
-        </div>
-        <div className="remotion-grid preview-track-grid">
-          {previewVariants.map((item, index) => (
-            <article key={item.id} className="remotion-card">
-              <header>
-                <strong>{item.title}</strong>
-                <span>{item.renderer} · {item.targetDurationSec}s · {item.frameBudget.minFrames}-{item.frameBudget.maxFrames} 帧</span>
-              </header>
-              <div className="fake-remotion-player">
-                <Player
-                  component={MarketingFakeVideo}
-                  durationInFrames={previewDurationFrames(item)}
-                  fps={REMOTION_FAKE_VIDEO_FPS}
-                  compositionWidth={REMOTION_FAKE_VIDEO_WIDTH}
-                  compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
-                  inputProps={{ ...playerProps, variant: item.track as FakeVideoVariant }}
-                  controls
-                  loop
-                  initialFrame={Math.min(36, previewDurationFrames(item) - 1)}
-                  initiallyMuted
-                  showVolumeControls={false}
-                  style={{ width: "100%" }}
-                />
-              </div>
-              <p>{index + 1}. {item.description}</p>
-            </article>
-          ))}
-        </div>
+        {generatedVideoUrl ? (
+          <article className="generated-video-card">
+            <header>
+              <strong>自动生成视频</strong>
+              <span>{props.result.generated.demo.note}</span>
+            </header>
+            <video src={generatedVideoUrl} controls playsInline preload="metadata" />
+          </article>
+        ) : null}
         {props.sampleVideo ? (
           <div className="source-video-grid">
             <SourceVideoCard title="上传视频回放" note="AI 已从这条视频抽帧拆解结构、节奏、字幕、包装与卡点方式" video={props.sampleVideo} />
@@ -1047,7 +1148,7 @@ function DemoPanel(props: { result: RunResult; totalDuration: number; sampleVide
         ) : null}
       </div>
       <div className="demo-explain">
-        <h2 id="demo-title">已生成 {props.totalDuration} 秒结构化预览</h2>
+        <h2 id="demo-title">{generatedVideoUrl ? "已生成自动化视频草稿" : `已生成 ${props.totalDuration} 秒结构化预览`}</h2>
         <div className="demo-buttons">
           <button type="button" onClick={() => props.setActiveTab("structure")}>
             <Layers3 size={16} aria-hidden="true" />
@@ -1074,44 +1175,13 @@ function SourceVideoCard(props: { title: string; note: string; video: UploadedVi
         <strong>{props.title}</strong>
         <span>{props.note}</span>
       </header>
-      <AdaptiveVideoPlayer video={props.video} title={props.title} variant="stage" />
+      {props.video.templateTrack ? <TemplatePreviewPlayer video={props.video} /> : hasPreviewUrl(props.video) ? <AdaptiveVideoPlayer video={props.video} title={props.title} variant="stage" /> : null}
       <p>{props.video.name}</p>
     </article>
   );
 }
 
-function fallbackPreviewVariants(targetDurationSec: number): PreviewVariant[] {
-  const target = Math.max(10, Math.min(60, Number.isFinite(targetDurationSec) ? targetDurationSec : 18));
-  const tracks: Array<{ track: VideoStyleTrack; title: string; description: string; renderer: PreviewVariant["renderer"] }> = [
-    { track: "ecommerce_burst", title: "电商爆品快切", description: "强 Hook、商品亮相、卖点三连和 CTA 收口。", renderer: "remotion" },
-    { track: "review_contrast", title: "测评对比", description: "问题开场、对照证明、真实感字幕和推荐收口。", renderer: "remotion" },
-    { track: "b2b_marketing", title: "B 端营销", description: "痛点场景、能力拆解、价值证明和咨询引导。", renderer: "hyperframes" },
-    { track: "talking_head_knowledge", title: "口播知识", description: "观点 Hook、三段解释、关键词强调和互动结尾。", renderer: "remotion" },
-    { track: "vlog_lifestyle", title: "生活方式 Vlog", description: "场景代入、轻字幕、节奏转场和自然 CTA。", renderer: "remotion" },
-    { track: "motion_graph_explainer", title: "MG 信息流", description: "标题卡、图文模块、卡点转场和流程化表达。", renderer: "hyperframes" },
-    { track: "event_promo", title: "活动促销", description: "优惠前置、倒计时包装、利益点堆叠和强行动。", renderer: "remotion" },
-    { track: "tutorial_steps", title: "教程步骤", description: "步骤拆解、操作镜头、字幕序号和总结卡片。", renderer: "remotion" },
-    { track: "premium_brand", title: "品牌质感", description: "慢节奏镜头、留白字幕、质感包装和品牌收束。", renderer: "remotion" },
-    { track: "cutting_beat", title: "剪辑卡点", description: "高密度切点、音乐节拍、转场组合和情绪递进。", renderer: "hyperframes" }
-  ];
-  return tracks.map((track, index) => ({
-    id: `fallback-preview-${index + 1}`,
-    ...track,
-    targetDurationSec: target,
-    frameBudget: {
-      minFrames: MIN_PREVIEW_FRAME_COUNT,
-      maxFrames: MAX_PREVIEW_FRAME_COUNT,
-      secondsPerFrame: SECONDS_PER_PREVIEW_FRAME
-    },
-    promptHint: `用 ${track.renderer} 生成 ${track.title} 本地预览。`
-  }));
-}
-
-function previewDurationFrames(item: PreviewVariant) {
-  return Math.max(1, Math.round(Math.min(60, item.targetDurationSec) * REMOTION_FAKE_VIDEO_FPS));
-}
-
-function AdaptiveVideoPlayer(props: { video: UploadedVideo; title: string; variant: "stage" | "aside" | "inline" }) {
+function AdaptiveVideoPlayer(props: { video: UploadedVideo & { previewUrl: string }; title: string; variant: "stage" | "aside" | "inline" }) {
   const [orientation, setOrientation] = useState<VideoOrientation>("unknown");
   const [aspectRatio, setAspectRatio] = useState("16 / 9");
 
@@ -1139,6 +1209,10 @@ function AdaptiveVideoPlayer(props: { video: UploadedVideo; title: string; varia
       />
     </div>
   );
+}
+
+function hasPreviewUrl(video: UploadedVideo | null | undefined): video is UploadedVideo & { previewUrl: string } {
+  return Boolean(video?.previewUrl);
 }
 
 function VideoAgentPanel(props: {
@@ -1427,7 +1501,9 @@ function VersionCards(props: { activeStrategy: CreativeStrategy }) {
 function PhonePreview(props: { result: RunResult; sampleVideo: UploadedVideo | null }) {
   return (
     <section className="phone-preview" aria-label="手机预览">
-      {props.sampleVideo ? (
+      {props.sampleVideo?.templateTrack ? (
+        <TemplatePreviewPlayer video={props.sampleVideo} />
+      ) : hasPreviewUrl(props.sampleVideo) ? (
         <AdaptiveVideoPlayer video={props.sampleVideo} title="侧栏预览" variant="aside" />
       ) : (
         <div className="phone-remotion-player">
@@ -1467,11 +1543,11 @@ function NaturalLanguageBar(props: { value: string; setValue: (value: string) =>
     >
       <span className="nl-label">
         <MessageSquareText size={17} aria-hidden="true" />
-        <label htmlFor="revisionPrompt">告诉 AI 你想怎么改：</label>
+        <label htmlFor="standaloneRevisionPrompt">告诉 AI 你想怎么改：</label>
       </span>
       <input
-        id="revisionPrompt"
-        name="revisionPrompt"
+        id="standaloneRevisionPrompt"
+        name="standaloneRevisionPrompt"
         autoComplete="off"
         value={props.value}
         onChange={(event) => props.setValue(event.target.value)}
@@ -1692,6 +1768,25 @@ async function extractVideoFrameDataUrls(file: File) {
 function frameSampleCountForDuration(durationSec: number) {
   const safeDuration = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 18;
   return Math.max(MIN_PREVIEW_FRAME_COUNT, Math.min(MAX_PREVIEW_FRAME_COUNT, Math.ceil(safeDuration / SECONDS_PER_PREVIEW_FRAME)));
+}
+
+function readResultTabFromUrl(): ResultTab {
+  if (typeof window === "undefined") return defaultResultTab;
+  const requestedTab = new URLSearchParams(window.location.search).get("tab");
+  return isResultTab(requestedTab) ? requestedTab : defaultResultTab;
+}
+
+function isResultTab(value: string | null): value is ResultTab {
+  return resultTabs.some((tab) => tab.value === value);
+}
+
+function selectedCreativeSkillNames(ids: CreativeReconstructionSkillId[]) {
+  const selected = new Set(ids);
+  return creativeReconstructionSkills.filter((skill) => selected.has(skill.id)).map((skill) => skill.name);
+}
+
+function splitSellingPoints(value: string) {
+  return value.split("\n").map((item) => item.trim()).filter(Boolean);
 }
 
 function waitForVideoEvent(video: HTMLVideoElement, eventName: "loadedmetadata" | "seeked") {

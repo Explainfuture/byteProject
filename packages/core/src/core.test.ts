@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SourceInput, VideoMetadata } from "@byteproject/shared";
+import { inferCreativeSkillIds } from "@byteproject/shared";
 import { analyzeSampleVideo, createBriefDrivenTranscript, matchSlots, runMockPipeline, segmentLongVideo } from "./index";
 
 describe("mock P0 pipeline", () => {
@@ -76,5 +77,20 @@ describe("mock P0 pipeline", () => {
 
     expect(shortMatches.some((match) => match.status !== "matched")).toBe(true);
     expect(longMatches.some((match) => match.status === "matched")).toBe(true);
+  });
+
+  it("infers creative SKU choices from the user brief instead of requiring manual selection", () => {
+    const ids = inferCreativeSkillIds({
+      prompt: "把样例迁移成高转化电商测评短视频，开头要更快更抓人",
+      productName: "智能随行杯",
+      sellingPoints: ["保温一整天", "单手开合", "通勤健身都能用"],
+      targetAudience: "通勤和运动人群",
+      strategy: "high_conversion"
+    });
+
+    expect(ids).toContain("structural_visual_copy_trading");
+    expect(ids).toContain("zero_inventory_affiliate_engine");
+    expect(ids).toContain("ctr_threshold_creative_mining");
+    expect(ids).toContain("non_destructive_frame_reconstruction");
   });
 });
