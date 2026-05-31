@@ -6,9 +6,8 @@ import express from "express";
 import multer from "multer";
 import { ZodError } from "zod";
 import { videoAnalyzerAdapter } from "@byteproject/adapters";
-import { runMockPipeline } from "@byteproject/core";
 import { knowledgeStore } from "@byteproject/knowledge";
-import type { VideoMetadata } from "@byteproject/shared";
+import type { RunResult, SourceInput, VideoMetadata } from "@byteproject/shared";
 import {
   analyzeSampleWithVision,
   normalizeSourceInput,
@@ -57,7 +56,7 @@ app.get("/api/health", (_request, response) => {
 });
 
 app.get("/api/demo", (_request, response) => {
-  response.json(runMockPipeline());
+  response.json(createAnalysisRequiredResult());
 });
 
 app.get("/api/knowledge", (_request, response) => {
@@ -142,19 +141,6 @@ app.listen(port, () => {
 
 function getVideoOrMock(id: string | undefined, role: "sample" | "material"): VideoMetadata {
   if (id && uploadedVideos.has(id)) return uploadedVideos.get(id)!;
-  const templateName = id?.startsWith("template-") ? `${id.slice("template-".length)} preset.mp4` : undefined;
-  if (id && templateName) {
-    return {
-      id,
-      role,
-      fileName: templateName,
-      durationSec: 18,
-      width: 1080,
-      height: 1920,
-      fps: 30,
-      sizeBytes: 0
-    };
-  }
   return {
     id: id || `${role}-mock`,
     role,
@@ -164,6 +150,62 @@ function getVideoOrMock(id: string | undefined, role: "sample" | "material"): Vi
     height: 1920,
     fps: 30,
     sizeBytes: 0
+  };
+}
+
+function createAnalysisRequiredResult(): RunResult {
+  const source: SourceInput = {
+    sampleVideoIds: [],
+    materialVideoId: "",
+    prompt: "",
+    productName: "",
+    sellingPoints: [],
+    targetAudience: "",
+    tone: "",
+    targetDurationSec: 18,
+    auxiliaryAssetIds: [],
+    strategy: "balanced",
+    creativeSkillIds: []
+  };
+  const video: VideoMetadata = {
+    id: "analysis-required",
+    role: "sample",
+    fileName: "等待上传视频.mp4",
+    durationSec: 18,
+    width: 1080,
+    height: 1920,
+    fps: 30,
+    sizeBytes: 0
+  };
+  return {
+    mode: "real",
+    source,
+    samples: [],
+    knowledge: [],
+    material: {
+      video: { ...video, id: "analysis-required-material", role: "material" },
+      segments: []
+    },
+    generated: {
+      id: "analysis-required-plan",
+      script: "",
+      storyboard: [],
+      timeline: [],
+      compositionPlan: {
+        id: "analysis-required-composition",
+        strategy: "balanced",
+        selectedAtomIds: [],
+        slotMatches: [],
+        rationale: ["等待上传视频和模型视觉结构分析；不会返回预设结构。"]
+      },
+      packagingSuggestions: [],
+      rendererPrompt: "",
+      previewVariants: [],
+      demo: {
+        status: "failed",
+        note: "上传视频完成视觉结构分析后才会生成结果。"
+      }
+    }
   };
 }
 

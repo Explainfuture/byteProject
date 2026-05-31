@@ -164,7 +164,7 @@ function evaluateResult({ uploadJson, firstGenerateJson, revisionGenerateJson, d
     blockers.push("short source video did not produce any weak/missing material gap diagnosis");
   }
   if (packaging.length < 3) blockers.push("packaging suggestions are too thin");
-  if ((generated?.previewVariants?.length ?? 0) !== 10) blockers.push("generated result did not expose 10 preview style tracks");
+  if ((generated?.previewVariants?.length ?? 0) < 1) blockers.push("generated result did not expose a model-derived preview variant");
   if ((generated?.previewVariants ?? []).some((variant) => variant.targetDurationSec > 60)) blockers.push("preview variant exceeded 60 seconds");
   if (trace.length < 2) blockers.push("agent trace is missing tool evidence");
   if (domMetrics.videoAgentPanelCount !== 1) blockers.push("Agent panel did not render");

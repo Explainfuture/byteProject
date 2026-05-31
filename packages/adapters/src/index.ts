@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { creativeReconstructionSkills } from "@byteproject/shared";
 import type {
   AssetType,
@@ -22,6 +24,7 @@ const installerFfmpegPath = (require("@ffmpeg-installer/ffmpeg") as { path?: str
 const DEFAULT_SECONDS_PER_VISION_FRAME = 4;
 const DEFAULT_MIN_VISION_FRAMES = 4;
 const DEFAULT_MAX_VISION_FRAMES = 16;
+const REMOTION_STORYBOARD_COMPOSITION_ID = "ByteProjectStoryboard";
 
 export type ToolProtocol<I, O> = {
   name: string;
@@ -98,8 +101,8 @@ export const remotionStoryboardAdapter: ToolProtocol<
   outputSchema: "{ url, path }",
   requiredEnv: [],
   filePermissions: ["OUTPUT_DIR"],
-  timeoutMs: 60_000,
-  fallback: "Create an HTML storyboard preview if MP4 rendering is unavailable.",
+  timeoutMs: 240_000,
+  fallback: "Render a Remotion MP4 by default; HTML fallback is disabled unless explicitly enabled.",
   async run(input) {
     await mkdir(input.outputDir, { recursive: true });
 
@@ -156,7 +159,7 @@ export const modelVideoUnderstandingAdapter: ToolProtocol<
   requiredEnv: ["ARK_BASE_URL", "ARK_API_KEY", "ARK_ENDPOINT_ID", "FFMPEG_PATH"],
   filePermissions: ["UPLOAD_DIR", "TMP_DIR"],
   timeoutMs: 90_000,
-  fallback: "Use deterministic rule-based sample analysis when video understanding is unavailable.",
+  fallback: "Return no analysis when video understanding is unavailable; callers must not synthesize preset slots.",
   async run(input) {
     if (process.env.ENABLE_VISION_ANALYSIS === "false") {
       return { provider: "mock", error: "ENABLE_VISION_ANALYSIS is false." };
@@ -449,13 +452,25 @@ function renderTimelineHtml(plan: GeneratedPlan) {
 }
 
 async function renderTimelineMp4(plan: GeneratedPlan, outputDir: string, materialVideo?: VideoMetadata, materialSegments: MaterialSegment[] = []) {
-  const ffmpeg = resolveFfmpegPath();
   const fileName = `${plan.id}.mp4`;
-  const assFileName = `${plan.id}.ass`;
   const outputPath = join(outputDir, fileName);
+
+  try {
+    await renderRemotionTimelineMp4(plan, outputPath);
+    return {
+      path: outputPath,
+      url: `/outputs/${fileName}`
+    };
+  } catch (error) {
+    if (process.env.ENABLE_LEGACY_FFMPEG_SYNTHETIC !== "true") throw error;
+  }
+
+  const ffmpeg = resolveFfmpegPath();
+  const assFileName = `${plan.id}.ass`;
   const sidecarNames = new Set<string>([assFileName]);
+  const hasStructuredMaterial = Boolean(materialVideo?.localPath && materialSegments.length && canRenderSourceFootage(materialVideo));
+
   await writeFile(join(outputDir, assFileName), renderTimelineAss(plan), "utf8");
-  const hasStructuredMaterial = Boolean(materialVideo?.localPath && materialSegments.length);
 
   try {
     if (hasStructuredMaterial) {
@@ -489,6 +504,58 @@ async function renderTimelineMp4(plan: GeneratedPlan, outputDir: string, materia
   }
 }
 
+async function renderRemotionTimelineMp4(plan: GeneratedPlan, outputPath: string) {
+  const [{ bundle }, { renderMedia, selectComposition }] = await Promise.all([import("@remotion/bundler"), import("@remotion/renderer")]);
+  const entryPoint = fileURLToPath(new URL("./remotion/entry.tsx", import.meta.url));
+  const serveUrl = await bundle({ entryPoint });
+  const browserExecutable = resolveRemotionBrowserExecutable();
+  if (!browserExecutable && process.env.ALLOW_REMOTION_BROWSER_DOWNLOAD !== "true") {
+    throw new Error("Remotion rendering requires Chrome. Set REMOTION_BROWSER_EXECUTABLE or ALLOW_REMOTION_BROWSER_DOWNLOAD=true.");
+  }
+  const inputProps = {
+    plan,
+    variant: plan.previewVariants.find((variant) => variant.renderer === "remotion") ?? plan.previewVariants[0]
+  };
+  const composition = await selectComposition({
+    serveUrl,
+    id: REMOTION_STORYBOARD_COMPOSITION_ID,
+    inputProps,
+    browserExecutable
+  });
+
+  await renderMedia({
+    serveUrl,
+    composition,
+    codec: "h264",
+    outputLocation: outputPath,
+    inputProps,
+    browserExecutable,
+    scale: resolveRemotionRenderScale(),
+    crf: 28,
+    concurrency: process.env.REMOTION_RENDER_CONCURRENCY ?? "50%",
+    logLevel: "warn",
+    timeoutInMilliseconds: Number(process.env.REMOTION_RENDER_TIMEOUT_MS ?? 180_000),
+    x264Preset: "veryfast"
+  });
+}
+
+function resolveRemotionBrowserExecutable() {
+  const candidates = [
+    process.env.REMOTION_BROWSER_EXECUTABLE,
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe") : undefined
+  ].filter((candidate): candidate is string => Boolean(candidate));
+
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function resolveRemotionRenderScale() {
+  const scale = Number(process.env.REMOTION_RENDER_SCALE ?? 0.55);
+  if (!Number.isFinite(scale)) return 0.55;
+  return Math.max(0.35, Math.min(1, scale));
+}
+
 async function renderSegmentTimelineMp4(input: {
   ffmpeg: string;
   plan: GeneratedPlan;
@@ -503,21 +570,25 @@ async function renderSegmentTimelineMp4(input: {
   const clipNames: string[] = [];
 
   for (const [index, item] of input.plan.timeline.entries()) {
-    const clipName = `${input.plan.id}-clip-${String(index + 1).padStart(3, "0")}.mp4`;
-    input.sidecarNames.add(clipName);
     const segment = resolveTimelineSegment(item.assetIds, segmentById, input.materialSegments, index);
-    const itemDuration = resolveTimelineItemDuration(item);
+    const slices = timelineClipDurations(item);
 
-    if (segment && input.materialVideo.localPath) {
-      const sourceName = `${input.plan.id}-source-${String(index + 1).padStart(3, "0")}.mp4`;
-      input.sidecarNames.add(sourceName);
-      await renderSourceSegmentClip(input.ffmpeg, input.outputDir, input.materialVideo.localPath, sourceName, segment);
-      await renderLoopedClip(input.ffmpeg, input.outputDir, sourceName, clipName, itemDuration);
-    } else {
-      await renderCardClip(input.ffmpeg, input.outputDir, clipName, itemDuration, index);
+    for (const [sliceIndex, sliceDuration] of slices.entries()) {
+      const visualIndex = index * 4 + sliceIndex;
+      const clipName = `${input.plan.id}-clip-${String(index + 1).padStart(3, "0")}-${sliceIndex + 1}.mp4`;
+      input.sidecarNames.add(clipName);
+
+      if (segment && input.materialVideo.localPath) {
+        const sourceName = `${input.plan.id}-source-${String(index + 1).padStart(3, "0")}-${sliceIndex + 1}.mp4`;
+        input.sidecarNames.add(sourceName);
+        await renderSourceSegmentClip(input.ffmpeg, input.outputDir, input.materialVideo.localPath, sourceName, segment, visualIndex);
+        await renderLoopedClip(input.ffmpeg, input.outputDir, sourceName, clipName, sliceDuration);
+      } else {
+        await renderCardClip(input.ffmpeg, input.outputDir, clipName, sliceDuration, visualIndex, item);
+      }
+
+      clipNames.push(clipName);
     }
-
-    clipNames.push(clipName);
   }
 
   const concatFileName = `${input.plan.id}-concat.txt`;
@@ -549,7 +620,7 @@ async function renderSegmentTimelineMp4(input: {
   );
 }
 
-async function renderSourceSegmentClip(ffmpeg: string, outputDir: string, sourcePath: string, fileName: string, segment: MaterialSegment) {
+async function renderSourceSegmentClip(ffmpeg: string, outputDir: string, sourcePath: string, fileName: string, segment: MaterialSegment, index: number) {
   const startSec = Math.max(0, Number(segment.startSec.toFixed(2)));
   const duration = Math.max(0.25, Number((segment.endSec - segment.startSec).toFixed(2)));
   await execJson(
@@ -563,7 +634,7 @@ async function renderSourceSegmentClip(ffmpeg: string, outputDir: string, source
       "-t",
       String(duration),
       "-vf",
-      baseVideoFilter(),
+      sourceSegmentFilter(index),
       "-an",
       "-r",
       "30",
@@ -601,7 +672,14 @@ async function renderLoopedClip(ffmpeg: string, outputDir: string, sourceName: s
   );
 }
 
-async function renderCardClip(ffmpeg: string, outputDir: string, clipName: string, duration: number, index: number) {
+async function renderCardClip(
+  ffmpeg: string,
+  outputDir: string,
+  clipName: string,
+  duration: number,
+  index: number,
+  item?: { slotId?: string }
+) {
   await execJson(
     ffmpeg,
     [
@@ -611,7 +689,7 @@ async function renderCardClip(ffmpeg: string, outputDir: string, clipName: strin
       "-i",
       `color=c=${cardColor(index)}:s=1080x1920:d=${duration}:r=30`,
       "-vf",
-      syntheticShotFilter(index, duration),
+      syntheticShotFilter(index, duration, item?.slotId),
       "-an",
       "-c:v",
       "libx264",
@@ -632,7 +710,7 @@ async function renderSyntheticTimelineMp4(input: {
   fileName: string;
   sidecarNames: Set<string>;
 }) {
-  if (input.materialVideo?.localPath) {
+  if (input.materialVideo?.localPath && canRenderSourceFootage(input.materialVideo)) {
     await renderLoopBackgroundMp4(input);
     return;
   }
@@ -643,10 +721,14 @@ async function renderSyntheticTimelineMp4(input: {
   const clipNames: string[] = [];
 
   for (const [index, item] of timeline.entries()) {
-    const clipName = `${input.plan.id}-clip-${String(index + 1).padStart(3, "0")}.mp4`;
-    input.sidecarNames.add(clipName);
-    await renderCardClip(input.ffmpeg, input.outputDir, clipName, resolveTimelineItemDuration(item), index);
-    clipNames.push(clipName);
+    const slices = timelineClipDurations(item);
+    for (const [sliceIndex, sliceDuration] of slices.entries()) {
+      const visualIndex = index * 4 + sliceIndex;
+      const clipName = `${input.plan.id}-clip-${String(index + 1).padStart(3, "0")}-${sliceIndex + 1}.mp4`;
+      input.sidecarNames.add(clipName);
+      await renderCardClip(input.ffmpeg, input.outputDir, clipName, sliceDuration, visualIndex, item);
+      clipNames.push(clipName);
+    }
   }
 
   const concatFileName = `${input.plan.id}-concat.txt`;
@@ -687,7 +769,7 @@ async function renderLoopBackgroundMp4(input: {
   fileName: string;
 }) {
   const duration = String(resolvePlanDuration(input.plan));
-  const videoFilter = [baseVideoFilter(), "eq=contrast=1.08:saturation=1.12", movingOverlayFilter(0), `ass=${input.assFileName}`].join(",");
+  const videoFilter = [sourceSegmentFilter(0), `ass=${input.assFileName}`].join(",");
   await execJson(
     input.ffmpeg,
     [
@@ -715,8 +797,21 @@ async function renderLoopBackgroundMp4(input: {
   );
 }
 
-function baseVideoFilter() {
-  return ["scale=1080:1920:force_original_aspect_ratio=increase", "crop=1080:1920", "setsar=1"].join(",");
+function baseVideoFilter(index = 0) {
+  const phase = Number((index * 0.73).toFixed(2));
+  return [
+    "scale=1188:2112:force_original_aspect_ratio=increase",
+    `crop=1080:1920:${expr(`(iw-1080)/2+((iw-1080)/2)*0.45*sin(t*0.62+${phase})`)}:${expr(
+      `(ih-1920)/2+((ih-1920)/2)*0.34*cos(t*0.48+${phase})`
+    )}`,
+    "setsar=1"
+  ].join(",");
+}
+
+function sourceSegmentFilter(index: number) {
+  const contrast = 1.04 + (index % 3) * 0.035;
+  const saturation = 1.08 + (index % 4) * 0.04;
+  return [baseVideoFilter(index), `eq=contrast=${contrast.toFixed(2)}:saturation=${saturation.toFixed(2)}`, movingOverlayFilter(index), sourceFrameTreatment(index)].join(",");
 }
 
 function resolveTimelineSegment(assetIds: string[], segmentById: Map<string, MaterialSegment>, fallbackSegments: MaterialSegment[], timelineIndex: number) {
@@ -732,16 +827,29 @@ function resolveTimelineItemDuration(item: { startSec: number; endSec: number })
   return Math.max(0.5, Number((item.endSec - item.startSec).toFixed(2)));
 }
 
+function canRenderSourceFootage(video: VideoMetadata) {
+  return video.role === "material" && video.id.startsWith("material-");
+}
+
+function timelineClipDurations(item: { startSec: number; endSec: number }) {
+  const duration = resolveTimelineItemDuration(item);
+  if (duration <= 2.4) return [duration];
+  const sliceCount = Math.min(5, Math.max(2, Math.ceil(duration / 2.15)));
+  const base = Number((duration / sliceCount).toFixed(2));
+  return Array.from({ length: sliceCount }, (_, index) => (index === sliceCount - 1 ? Number((duration - base * (sliceCount - 1)).toFixed(2)) : base));
+}
+
 function cardColor(index: number) {
-  const colors = ["0x111317", "0x17292F", "0x2A1C34", "0x163025", "0x302818", "0x1B2233"];
+  const colors = ["0x101419", "0x0B2A32", "0x2A173C", "0x103727", "0x3A2511", "0x182247", "0x3B1825", "0x132F49"];
   return colors[index % colors.length];
 }
 
-function syntheticShotFilter(index: number, duration: number) {
+function syntheticShotFilter(index: number, duration: number, slotId?: string) {
   return [
     "format=rgba",
+    kineticBackdropFilter(index),
     movingOverlayFilter(index),
-    shotLayoutFilter(index, duration),
+    shotLayoutFilter(index, duration, slotId),
     "format=yuv420p"
   ].join(",");
 }
@@ -750,53 +858,110 @@ function movingOverlayFilter(index: number) {
   const accent = accentColor(index);
   const warm = warmAccentColor(index);
   return [
-    `drawbox=x=${expr("-260+mod(t*260\\,1600)")}:y=132:w=520:h=10:color=${accent}@0.72:t=fill`,
-    `drawbox=x=${expr("820-mod(t*150\\,520)")}:y=1540:w=360:h=18:color=${warm}@0.60:t=fill`,
-    `drawbox=x=${expr("70+18*sin(t*2.1)")}:y=${expr("270+22*cos(t*1.7)")}:w=930:h=520:color=0xffffff@0.055:t=fill`,
-    `drawbox=x=${expr("120+28*cos(t*1.4)")}:y=${expr("1230+18*sin(t*2.3)")}:w=840:h=260:color=0x000000@0.22:t=fill`,
-    `drawbox=x=0:y=${expr("1810-mod(t*180\\,520)")}:w=1080:h=56:color=${accent}@0.24:t=fill`
+    `drawbox=x=${expr("-340+mod(t*360\\,1760)")}:y=104:w=680:h=12:color=${accent}@0.78:t=fill`,
+    `drawbox=x=${expr("960-mod(t*180\\,620)")}:y=1540:w=420:h=20:color=${warm}@0.68:t=fill`,
+    `drawbox=x=${expr(`58+26*sin(t*1.9+${index})`)}:y=${expr("244+30*cos(t*1.4)")}:w=960:h=500:color=0xffffff@0.050:t=fill`,
+    `drawbox=x=${expr("110+32*cos(t*1.2)")}:y=${expr(`1190+22*sin(t*2.0+${index})`)}:w=850:h=300:color=0x000000@0.24:t=fill`,
+    `drawbox=x=0:y=${expr("1780-mod(t*240\\,640)")}:w=1080:h=62:color=${accent}@0.26:t=fill`,
+    `drawbox=x=${expr("-520+mod(t*95\\,1600)")}:y=860:w=480:h=640:color=${warm}@0.08:t=fill`
   ].join(",");
 }
 
-function shotLayoutFilter(index: number, duration: number) {
+function kineticBackdropFilter(index: number) {
   const accent = accentColor(index);
-  const progressWidth = Math.max(70, Math.min(940, Math.round(940 / Math.max(1, duration))));
-  const layouts = [
-    [
-      `drawbox=x=82:y=310:w=916:h=12:color=${accent}@0.95:t=fill`,
-      "drawbox=x=82:y=1180:w=210:h=210:color=0xffffff@0.12:t=fill",
-      "drawbox=x=326:y=1180:w=210:h=210:color=0xffffff@0.08:t=fill",
-      "drawbox=x=570:y=1180:w=210:h=210:color=0xffffff@0.08:t=fill"
-    ],
-    [
-      "drawbox=x=94:y=270:w=420:h=620:color=0xffffff@0.08:t=fill",
-      `drawbox=x=570:y=270:w=410:h=620:color=${accent}@0.16:t=fill`,
-      "drawbox=x=128:y=1120:w=824:h=150:color=0x000000@0.25:t=fill"
-    ],
-    [
-      `drawbox=x=90:y=290:w=900:h=132:color=${accent}@0.20:t=fill`,
-      "drawbox=x=140:y=520:w=800:h=6:color=0xffffff@0.30:t=fill",
-      "drawbox=x=140:y=690:w=800:h=6:color=0xffffff@0.20:t=fill",
-      "drawbox=x=140:y=860:w=800:h=6:color=0xffffff@0.14:t=fill"
-    ],
-    [
-      "drawbox=x=80:y=260:w=920:h=1160:color=0x000000@0.20:t=fill",
-      `drawbox=x=120:y=330:w=260:h=260:color=${accent}@0.20:t=fill`,
-      "drawbox=x=420:y=330:w=540:h=260:color=0xffffff@0.08:t=fill",
-      "drawbox=x=120:y=640:w=840:h=96:color=0xffffff@0.08:t=fill",
-      "drawbox=x=120:y=780:w=660:h=96:color=0xffffff@0.07:t=fill"
-    ],
-    [
-      `drawbox=x=90:y=1260:w=900:h=180:color=${accent}@0.20:t=fill`,
-      "drawbox=x=150:y=330:w=780:h=780:color=0xffffff@0.055:t=fill",
-      "drawbox=x=230:y=410:w=620:h=620:color=0x000000@0.16:t=fill"
-    ]
-  ];
+  const warm = warmAccentColor(index);
+  const cool = coolAccentColor(index);
   return [
-    ...layouts[index % layouts.length],
+    `drawbox=x=0:y=0:w=1080:h=1920:color=${accent}@0.055:t=fill`,
+    `drawbox=x=${expr("760+34*sin(t*0.9)")}:y=220:w=320:h=980:color=${cool}@0.12:t=fill`,
+    `drawbox=x=0:y=${expr("360+48*cos(t*0.7)")}:w=220:h=920:color=${warm}@0.10:t=fill`,
+    `drawbox=x=${expr("120+mod(t*46\\,220)")}:y=156:w=2:h=1460:color=0xffffff@0.075:t=fill`,
+    `drawbox=x=${expr("320+mod(t*62\\,310)")}:y=156:w=2:h=1460:color=0xffffff@0.045:t=fill`,
+    `drawbox=x=70:y=${expr("1720+12*sin(t*2.4)")}:w=940:h=1:color=0xffffff@0.22:t=fill`
+  ].join(",");
+}
+
+function shotLayoutFilter(index: number, duration: number, slotId?: string) {
+  const accent = accentColor(index);
+  const warm = warmAccentColor(index);
+  const cool = coolAccentColor(index);
+  const progressWidth = Math.max(70, Math.min(940, Math.round(940 / Math.max(1, duration))));
+  const layoutKind = shotLayoutKind(slotId, index);
+  const layouts: Record<string, string[]> = {
+    hook: [
+      `drawbox=x=72:y=${expr("250+24*sin(t*1.6)")}:w=936:h=310:color=0x000000@0.42:t=fill`,
+      `drawbox=x=72:y=${expr("250+24*sin(t*1.6)")}:w=936:h=14:color=${accent}@0.98:t=fill`,
+      `drawbox=x=${expr("120+mod(t*170\\,520)")}:y=650:w=180:h=180:color=${warm}@0.20:t=fill`,
+      "drawbox=x=330:y=650:w=180:h=180:color=0xffffff@0.10:t=fill",
+      `drawbox=x=540:y=650:w=180:h=180:color=${cool}@0.16:t=fill`,
+      "drawbox=x=750:y=650:w=180:h=180:color=0xffffff@0.08:t=fill",
+      `drawbox=x=0:y=960:w=${220 + (index % 3) * 70}:h=32:color=${accent}@0.72:t=fill`
+    ],
+    body: [
+      "drawbox=x=82:y=240:w=430:h=760:color=0xffffff@0.075:t=fill",
+      `drawbox=x=128:y=300:w=338:h=560:color=${cool}@0.20:t=fill`,
+      `drawbox=x=${expr("560+24*sin(t*1.1)")}:y=280:w=410:h=140:color=${accent}@0.18:t=fill`,
+      "drawbox=x=560:y=470:w=410:h=138:color=0xffffff@0.095:t=fill",
+      `drawbox=x=560:y=660:w=410:h=138:color=${warm}@0.16:t=fill`,
+      "drawbox=x=128:y=1110:w=820:h=132:color=0x000000@0.30:t=fill"
+    ],
+    proof: [
+      "drawbox=x=70:y=260:w=455:h=650:color=0xffffff@0.070:t=fill",
+      `drawbox=x=555:y=260:w=455:h=650:color=${accent}@0.20:t=fill`,
+      `drawbox=x=${expr("520+20*sin(t*2.2)")}:y=260:w=12:h=650:color=${warm}@0.86:t=fill`,
+      "drawbox=x=126:y=980:w=828:h=110:color=0x000000@0.30:t=fill",
+      "drawbox=x=126:y=1140:w=828:h=110:color=0xffffff@0.070:t=fill",
+      `drawbox=x=${expr("126+mod(t*210\\,700)")}:y=1260:w=160:h=16:color=${accent}@0.90:t=fill`
+    ],
+    offer: [
+      `drawbox=x=88:y=260:w=904:h=430:color=${warm}@0.18:t=fill`,
+      "drawbox=x=126:y=330:w=250:h=250:color=0xffffff@0.12:t=fill",
+      `drawbox=x=410:y=330:w=250:h=250:color=${cool}@0.18:t=fill`,
+      "drawbox=x=694:y=330:w=250:h=250:color=0xffffff@0.10:t=fill",
+      "drawbox=x=90:y=860:w=900:h=420:color=0x000000@0.28:t=fill",
+      `drawbox=x=90:y=${expr("1380+18*sin(t*1.8)")}:w=900:h=120:color=${accent}@0.18:t=fill`
+    ],
+    cta: [
+      "drawbox=x=104:y=280:w=872:h=872:color=0xffffff@0.060:t=fill",
+      "drawbox=x=184:y=360:w=712:h=712:color=0x000000@0.22:t=fill",
+      `drawbox=x=180:y=${expr("1270+18*sin(t*2.0)")}:w=720:h=172:color=${accent}@0.78:t=fill`,
+      `drawbox=x=${expr("250+mod(t*160\\,420)")}:y=1476:w=180:h=18:color=${warm}@0.92:t=fill`,
+      "drawbox=x=220:y=1610:w=640:h=4:color=0xffffff@0.22:t=fill"
+    ],
+    dense: [
+      `drawbox=x=80:y=245:w=920:h=1180:color=0x000000@0.22:t=fill`,
+      `drawbox=x=124:y=305:w=260:h=260:color=${accent}@0.22:t=fill`,
+      "drawbox=x=420:y=305:w=540:h=260:color=0xffffff@0.08:t=fill",
+      "drawbox=x=124:y=620:w=836:h=88:color=0xffffff@0.09:t=fill",
+      `drawbox=x=124:y=746:w=686:h=88:color=${cool}@0.13:t=fill`,
+      "drawbox=x=124:y=872:w=760:h=88:color=0xffffff@0.07:t=fill"
+    ]
+  };
+  return [
+    ...(layouts[layoutKind] ?? layouts.dense),
     `drawbox=x=70:y=1680:w=940:h=12:color=0xffffff@0.16:t=fill`,
     `drawbox=x=${expr(`70+mod(t*${progressWidth}\\,940)`)}:y=1680:w=120:h=12:color=${accent}@0.92:t=fill`
   ].join(",");
+}
+
+function sourceFrameTreatment(index: number) {
+  const accent = accentColor(index);
+  const warm = warmAccentColor(index);
+  return [
+    `drawbox=x=52:y=92:w=976:h=2:color=0xffffff@0.20:t=fill`,
+    `drawbox=x=${expr("70+mod(t*210\\,820)")}:y=92:w=170:h=8:color=${accent}@0.86:t=fill`,
+    `drawbox=x=62:y=${expr("1500+20*sin(t*1.5)")}:w=956:h=210:color=0x000000@0.26:t=fill`,
+    `drawbox=x=${expr("770+24*cos(t*1.0)")}:y=228:w=230:h=230:color=${warm}@0.14:t=fill`
+  ].join(",");
+}
+
+function shotLayoutKind(slotId: string | undefined, index: number) {
+  if (/hook/i.test(slotId ?? "")) return "hook";
+  if (/body|product/i.test(slotId ?? "")) return "body";
+  if (/proof/i.test(slotId ?? "")) return "proof";
+  if (/offer/i.test(slotId ?? "")) return "offer";
+  if (/cta/i.test(slotId ?? "")) return "cta";
+  return ["hook", "body", "proof", "offer", "dense", "cta"][index % 6];
 }
 
 function accentColor(index: number) {
@@ -806,6 +971,11 @@ function accentColor(index: number) {
 
 function warmAccentColor(index: number) {
   const colors = ["0xFFD166", "0xFF8E72", "0xF6A6FF", "0xB8F26D", "0x8BD3FF", "0x70E0C1"];
+  return colors[index % colors.length];
+}
+
+function coolAccentColor(index: number) {
+  const colors = ["0x8BD3FF", "0x70E0C1", "0xB8F26D", "0xF6A6FF", "0xFFD166", "0xFF8E72"];
   return colors[index % colors.length];
 }
 
@@ -828,16 +998,20 @@ function renderTimelineAss(plan: GeneratedPlan) {
     .map((item, index) => {
       const start = formatAssTime(item.startSec);
       const end = formatAssTime(item.endSec);
-      const title = `镜头 ${index + 1} · ${segmentTitle(item.slotId)} · ${item.startSec}s-${item.endSec}s`;
       const caption = item.caption || plan.id;
-      const packaging = [...item.packaging.slice(0, 2), item.transition ? `转场：${item.transition}` : "", item.beatHint ? `节奏：${item.beatHint}` : ""]
+      const renderedTitle = `SHOT ${index + 1} / ${segmentTitle(item.slotId)} / ${item.startSec}s-${item.endSec}s`;
+      const packaging = [item.packaging[0], item.beatHint ? `beat: ${item.beatHint}` : ""]
         .filter(Boolean)
         .join(" / ");
-      const mainY = 450 + (index % 3) * 80;
+      const layout = assLayout(index, item.slotId);
       return [
-        `Dialogue: 0,${start},${end},Top,,0,0,0,,{\\an7\\pos(84,112)\\fad(120,120)}${assText(title)}`,
-        `Dialogue: 1,${start},${end},Main,,0,0,0,,{\\an7\\move(92,${mainY + 52},92,${mainY},0,260)\\fad(100,120)}${assText(caption)}`,
-        packaging ? `Dialogue: 2,${start},${end},Bottom,,0,0,0,,{\\an1\\pos(92,1578)\\fad(160,120)}${assText(packaging)}` : ""
+        `Dialogue: 0,${start},${end},Top,,0,0,0,,{${layout.top}\\fad(90,120)}${assText(renderedTitle)}`,
+        `Dialogue: 1,${start},${end},Chip,,0,0,0,,{${layout.chip}\\fad(90,110)}${assText(layout.label)}`,
+        `Dialogue: 2,${start},${end},Main,,0,0,0,,{${layout.main}\\fad(80,120)}${assText(caption)}`,
+        packaging ? `Dialogue: 3,${start},${end},Bottom,,0,0,0,,{${layout.bottom}\\fad(140,120)}${assText(packaging)}` : "",
+        item.beatHint || item.transition
+          ? `Dialogue: 4,${start},${end},Micro,,0,0,0,,{${layout.micro}\\fad(120,120)}${assText([item.beatHint, item.transition].filter(Boolean).join("  |  "))}`
+          : ""
       ]
         .filter(Boolean)
         .join("\n");
@@ -854,13 +1028,70 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Top, Microsoft YaHei, 38, &H00D9FFF7, &H00FFFFFF, &H00101517, &H99000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 8, 72, 72, 96, 1
+Style: Chip, Microsoft YaHei, 34, &H00FFFFFF, &H00FFFFFF, &H00101517, &HAA000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 4, 1, 8, 60, 60, 80, 1
 Style: Main, Microsoft YaHei, 76, &H00FFFFFF, &H00FFFFFF, &H00101517, &HAA000000, -1, 0, 0, 0, 100, 100, 0, 0, 1, 5, 2, 7, 84, 84, 96, 1
 Style: Bottom, Microsoft YaHei, 40, &H00F9E3C1, &H00FFFFFF, &H00101517, &HAA000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 3, 0, 1, 72, 72, 130, 1
+Style: Micro, Microsoft YaHei, 30, &H00BFEAFF, &H00FFFFFF, &H00101517, &H99000000, 0, 0, 0, 0, 100, 100, 0, 0, 1, 2, 0, 5, 72, 72, 72, 1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 ${events}
 `;
+}
+
+function assLayout(index: number, slotId: string) {
+  const kind = shotLayoutKind(slotId, index);
+  const layouts: Record<string, { top: string; chip: string; main: string; bottom: string; micro: string; label: string }> = {
+    hook: {
+      top: "\\an7\\pos(78,88)",
+      chip: "\\an9\\pos(998,98)",
+      main: "\\an7\\move(88,430,88,370,0,260)",
+      bottom: "\\an1\\pos(92,1588)",
+      micro: "\\an5\\pos(540,1708)",
+      label: "HOOK"
+    },
+    body: {
+      top: "\\an7\\pos(86,92)",
+      chip: "\\an7\\pos(116,1040)",
+      main: "\\an7\\move(92,540,92,492,0,260)\\fs64",
+      bottom: "\\an1\\pos(92,1580)",
+      micro: "\\an5\\pos(540,1710)",
+      label: "PRODUCT"
+    },
+    proof: {
+      top: "\\an8\\pos(540,96)",
+      chip: "\\an5\\pos(540,932)",
+      main: "\\an5\\move(540,1120,540,1064,0,260)",
+      bottom: "\\an1\\pos(92,1586)",
+      micro: "\\an5\\pos(540,1710)",
+      label: "PROOF"
+    },
+    offer: {
+      top: "\\an7\\pos(86,96)",
+      chip: "\\an9\\pos(986,716)",
+      main: "\\an7\\move(112,980,112,920,0,260)",
+      bottom: "\\an1\\pos(92,1588)",
+      micro: "\\an5\\pos(540,1712)",
+      label: "OFFER"
+    },
+    cta: {
+      top: "\\an8\\pos(540,104)",
+      chip: "\\an8\\pos(540,1220)",
+      main: "\\an5\\move(540,910,540,850,0,260)",
+      bottom: "\\an5\\pos(540,1420)",
+      micro: "\\an5\\pos(540,1584)",
+      label: "CTA"
+    },
+    dense: {
+      top: "\\an7\\pos(82,96)",
+      chip: "\\an9\\pos(984,96)",
+      main: "\\an7\\move(120,790,120,730,0,260)",
+      bottom: "\\an1\\pos(92,1584)",
+      micro: "\\an5\\pos(540,1710)",
+      label: "BEAT"
+    }
+  };
+  return layouts[kind] ?? layouts.dense;
 }
 
 function resolvePlanDuration(plan: GeneratedPlan) {
@@ -878,11 +1109,24 @@ function formatAssTime(value: number) {
 }
 
 function assText(value: string) {
-  return value
+  const cleaned = value
     .replace(/[{}]/g, "")
-    .replace(/\r?\n/g, "\\N")
-    .replace(/,/g, "，")
+    .replace(/\r?\n/g, " ")
+    .replace(/,/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
     .slice(0, 120);
+  return wrapAssText(cleaned, 14);
+}
+
+function wrapAssText(value: string, maxChars: number) {
+  const chars = Array.from(value);
+  if (chars.length <= maxChars) return value;
+  const lines: string[] = [];
+  for (let index = 0; index < chars.length; index += maxChars) {
+    lines.push(chars.slice(index, index + maxChars).join(""));
+  }
+  return lines.slice(0, 4).join("\\N");
 }
 
 function segmentTitle(slotId: string) {
@@ -934,7 +1178,6 @@ function buildCreativeMessages(input: ModelEnhancementInput) {
       id: skill.id,
       name: skill.name,
       remotionUse: skill.remotionUse,
-      hyperframesUse: skill.hyperframesUse,
       guardrail: skill.guardrail
     }));
 
@@ -951,7 +1194,7 @@ function buildCreativeMessages(input: ModelEnhancementInput) {
           "基于样例结构、新素材槽位匹配和知识原子，增强新视频方案。保持 timeline 的 id/slotId/startSec/endSec 不变，只改 caption、packaging、transition、beatHint、script、rationale。不要输出 storyboard。",
         outputSchema: {
           script: "string，中文，按段落输出，每段以【Hook/展开/证明/卖点/CTA】开头",
-          rendererPrompt: "string，给 Remotion/Hyperframes 的结构化渲染提示，说明 10 个赛道预览如何按 timeline 拼接，时长必须小于等于 60 秒",
+          rendererPrompt: "string，给 Remotion 的结构化渲染提示，只说明本次分析派生的 timeline 如何渲染，时长必须小于等于 60 秒",
           timeline: [
             {
               id: "必须使用输入 timeline 的 id",
@@ -989,7 +1232,6 @@ function buildModelPlanComposerMessages(input: ModelPlanComposerInput) {
       id: skill.id,
       name: skill.name,
       remotionUse: skill.remotionUse,
-      hyperframesUse: skill.hyperframesUse,
       guardrail: skill.guardrail
     }));
   const knowledgeAtoms = input.knowledge.flatMap((entry) => entry.atoms).slice(0, 10).map((atom) => ({

@@ -4,9 +4,35 @@ import { modelCreativeAdapter, modelPlanComposerAdapter, modelVideoUnderstanding
 import { analyzeSampleVideo, createBriefDrivenTranscript, segmentLongVideo } from "@byteproject/core";
 import { knowledgeStore } from "@byteproject/knowledge";
 import { inferCreativeSkillIds } from "@byteproject/shared";
-import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, RunResult, SampleAnalysis, SourceInput, StructureSlot, VideoMetadata } from "@byteproject/shared";
+import type {
+  GeneratedPlan,
+  KnowledgeEntry,
+  MaterialSegment,
+  PreviewVariant,
+  RunResult,
+  SampleAnalysis,
+  SegmentKind,
+  SourceInput,
+  StructureSlot,
+  TimelineItem,
+  VideoMetadata
+} from "@byteproject/shared";
 
 const creativeStrategySchema = z.enum(["balanced", "high_click", "high_conversion", "high_rhythm", "premium"]);
+const FRAME_BUDGET = {
+  minFrames: 4,
+  maxFrames: 16,
+  secondsPerFrame: 4
+} as const;
+
+const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "frameBudget" | "promptHint">> = [
+  {
+    track: "motion_graph_explainer",
+    title: "分析派生预览",
+    description: "只按本次视频分析出的 timeline、字幕、包装和缺口方案渲染，不套用预设版本。",
+    renderer: "remotion"
+  }
+];
 
 export const sourceInputSchema = z
   .object({
@@ -87,7 +113,7 @@ export function normalizeSourceInput(body: unknown): SourceInput {
     materialVideoId: parsed.materialVideoId || sampleVideoIds[0],
     prompt: parsed.prompt || "把这段素材重构成一个高转化商品短视频",
     productName: parsed.productName || "未命名商品",
-    sellingPoints: parsed.sellingPoints?.length ? parsed.sellingPoints : ["根据目标描述提炼核心卖点", "用上传视频画面支撑表达", "素材不足处用包装补全"],
+    sellingPoints: parsed.sellingPoints?.length ? parsed.sellingPoints : [],
     targetAudience: parsed.targetAudience || "目标用户",
     tone: parsed.tone || "专业、清晰、有节奏",
     targetDurationSec: parsed.targetDurationSec || 18,
@@ -490,14 +516,8 @@ export async function analyzeSampleWithVision(
   });
 
   if (!model.analysis) {
-    const analysis = analyzeSampleVideo(video, createBriefDrivenTranscript(source, video));
     return {
-      analysis: {
-        ...analysis,
-        summary: fallbackAnalysisSummary(video, source, getFrameCount(video, model)),
-        rhythmPattern: fallbackRhythmPattern(video, source),
-        packagingPattern: ["基于 Brief 的标题条", "卖点卡片补全", "素材不足时使用结构重排 / 局部复用 / AIGC 补全"]
-      },
+      analysis: createModelMissingSampleAnalysis(video, source, model),
       model
     };
   }
@@ -517,21 +537,46 @@ export async function analyzeSampleWithVision(
   };
 }
 
-function mergeVisionSlots(baseSlots: StructureSlot[], visionSlots?: NonNullable<Awaited<ReturnType<typeof modelVideoUnderstandingAdapter.run>>["analysis"]>["slots"]) {
+function createModelMissingSampleAnalysis(
+  video: VideoMetadata,
+  source: Pick<SourceInput, "prompt" | "productName" | "sellingPoints" | "targetAudience" | "tone" | "targetDurationSec">,
+  model: Awaited<ReturnType<typeof modelVideoUnderstandingAdapter.run>>
+): SampleAnalysis {
+  void source;
+  return {
+    video,
+    transcript: [],
+    summary: `等待模型从 ${video.fileName} 的抽帧里识别结构槽位；没有视觉分析结果时不生成预设结构。`,
+    slots: [],
+    atoms: [],
+    rhythmPattern: "未生成：需要模型视觉分析。",
+    packagingPattern: [],
+    shotCount: getFrameCount(video, model)
+  };
+}
+
+function mergeVisionSlots(baseSlots: StructureSlot[], visionSlots?: NonNullable<Awaited<ReturnType<typeof modelVideoUnderstandingAdapter.run>>["analysis"]>["slots"]): StructureSlot[] {
   if (!visionSlots?.length) return baseSlots;
-  const bySegment = new Map(visionSlots.filter((slot) => slot.segment).map((slot) => [slot.segment!, slot]));
-  return baseSlots.map((slot) => {
-    const vision = bySegment.get(slot.segment);
-    if (!vision) return slot;
+  void baseSlots;
+  return visionSlots.map((vision, index) => {
+    const segment = vision.segment ?? segmentOrder[Math.min(index, segmentOrder.length - 1)];
     return {
-      ...slot,
-      intent: vision.intent || slot.intent,
-      requiredAssetTypes: vision.requiredAssetTypes?.length ? vision.requiredAssetTypes : slot.requiredAssetTypes,
-      durationSec: vision.durationSec || slot.durationSec,
-      rhythmHint: vision.rhythmHint || slot.rhythmHint,
-      packagingHints: vision.packagingHints?.length ? vision.packagingHints : slot.packagingHints
+      id: `vision-${segment}-${index + 1}`,
+      segment,
+      intent: vision.intent || `模型识别结构 ${index + 1}`,
+      requiredAssetTypes: vision.requiredAssetTypes?.length ? vision.requiredAssetTypes : [],
+      durationSec: vision.durationSec || normalizeVisionSlotDuration(index),
+      importance: index === 0 ? "high" : "medium",
+      rhythmHint: vision.rhythmHint || "medium",
+      packagingHints: vision.packagingHints?.length ? vision.packagingHints : []
     };
   });
+}
+
+const segmentOrder: SegmentKind[] = ["hook", "body", "proof", "offer", "cta"];
+
+function normalizeVisionSlotDuration(index: number) {
+  return [2.4, 3.6, 4.8, 3.2, 2][Math.min(index, 4)];
 }
 
 function applyModelEnhancement(generated: GeneratedPlan, enhancement: Awaited<ReturnType<typeof modelCreativeAdapter.run>>["enhancement"]) {
@@ -581,9 +626,8 @@ async function composeModelGeneratedPlan(
   knowledge: KnowledgeEntry[],
   materialSegments: MaterialSegment[]
 ): Promise<GeneratedPlan> {
-  const templatePresetMode = canPlanFromTemplatePreset(context);
-  if (requiresModelPlanning() && !context.sampleVision?.analysis && !templatePresetMode) {
-    throw new Error("Model video understanding is required before composing a production plan.");
+  if (!context.sampleVision?.analysis?.slots?.length || !sample.slots.length) {
+    throw new Error("Model video understanding with structure slots is required before composing a production plan.");
   }
 
   const result = await modelPlanComposerAdapter.run({
@@ -598,12 +642,6 @@ async function composeModelGeneratedPlan(
   }
 
   const generated = buildGeneratedPlanFromModel(source, sample, materialSegments, result.plan);
-  if (templatePresetMode && !context.sampleVision?.analysis) {
-    generated.compositionPlan.rationale = [
-      "Template preset path: no uploaded frames were available, so the model composed from the selected preset brief and generated candidate material slots.",
-      ...generated.compositionPlan.rationale
-    ].slice(0, 5);
-  }
   return generated;
 }
 
@@ -642,8 +680,8 @@ function buildGeneratedPlanFromModel(
       endSec: Number(item.endSec!.toFixed(2)),
       slotId: item.slotId!,
       assetIds: (item.assetIds ?? []).filter((id) => materialIds.has(id)),
-      caption: item.caption || "Model planned caption",
-      packaging: item.packaging?.length ? item.packaging : ["Model planned packaging"],
+      caption: item.caption || "",
+      packaging: item.packaging?.length ? item.packaging : [],
       transition: item.transition,
       beatHint: item.beatHint
     }));
@@ -653,11 +691,13 @@ function buildGeneratedPlanFromModel(
   const storyboard = (plan.storyboard ?? []).filter((item) => item.slotId && slotIds.has(item.slotId)).map((item, index) => ({
     id: item.id || `storyboard-${index + 1}`,
     slotId: item.slotId!,
-    title: item.title || `Shot ${index + 1}`,
-    visual: item.visual || "Model planned visual",
+    title: item.title || `镜头 ${index + 1}`,
+    visual: item.visual || "",
     caption: item.caption || timeline.find((candidate) => candidate.slotId === item.slotId)?.caption || "",
-    reason: item.reason || "Model planned this shot from the extracted method."
+    reason: item.reason || ""
   }));
+
+  const previewVariants = buildPreviewVariants(source, timeline);
 
   return {
     id: `plan-${Date.now()}`,
@@ -676,12 +716,28 @@ function buildGeneratedPlanFromModel(
     },
     packagingSuggestions: plan.packagingSuggestions ?? [],
     rendererPrompt: plan.rendererPrompt || "Render the model-generated timeline as a vertical MP4.",
-    previewVariants: [],
+    previewVariants,
     demo: {
       status: "mock_ready",
       note: "Model-generated production recipe is ready for rendering."
     }
   };
+}
+
+function buildPreviewVariants(source: SourceInput, timeline: TimelineItem[]): PreviewVariant[] {
+  const targetDurationSec = Math.max(10, Math.min(60, timeline.at(-1)?.endSec ?? source.targetDurationSec ?? 18));
+  return previewTracks.map((track, index) => ({
+    id: `preview-${index + 1}-${track.track}`,
+    ...track,
+    targetDurationSec,
+    frameBudget: { ...FRAME_BUDGET },
+    promptHint: [
+      `Render a ${track.title} local preview with ${track.renderer}.`,
+      `Keep the result within ${targetDurationSec}s and use a ${FRAME_BUDGET.minFrames}-${FRAME_BUDGET.maxFrames} frame analysis budget.`,
+      "Use the transferred structure and new brief only; do not copy sample visuals, sample subtitles, or original copy.",
+      `Focus: ${track.description}`
+    ].join(" ")
+  }));
 }
 
 function buildModelRequiredFailurePlan(source: SourceInput, reason: string): GeneratedPlan {
@@ -707,18 +763,6 @@ function buildModelRequiredFailurePlan(source: SourceInput, reason: string): Gen
   };
 }
 
-function requiresModelPlanning() {
-  return process.env.ALLOW_LOCAL_RULE_FALLBACK !== "true";
-}
-
-function canPlanFromTemplatePreset(context: AgentContext) {
-  return isTemplatePresetVideo(context.sampleVideo) && isTemplatePresetVideo(context.materialVideo);
-}
-
-function isTemplatePresetVideo(video: VideoMetadata) {
-  return video.id.startsWith("template-");
-}
-
 function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: AgentRunResult["agentMode"]): AgentRunResult {
   if (!context.sample || !context.knowledge || !context.materialSegments || !context.generated) {
     throw new Error("Agent context is incomplete.");
@@ -740,19 +784,16 @@ function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: Ag
 
 function addAnalysisRationale(context: AgentContext) {
   if (!context.generated) return;
-  if (!context.sampleVision?.analysis && isTemplatePresetVideo(context.sampleVideo)) {
+  const frameCount = getFrameCount(context.sampleVideo, context.sampleVision);
+  if (!context.sampleVision?.analysis) {
     context.generated.compositionPlan.rationale = [
-      "Using selected preset video template: no uploaded frames were available, so the model planned from the preset brief and candidate material slots.",
+      `模型没有返回视频结构分析 slots；本轮不应输出预设方案。已抽取关键帧数量：${frameCount}。`,
       ...context.generated.compositionPlan.rationale
     ].slice(0, 5);
     return;
   }
-  const frameCount = getFrameCount(context.sampleVideo, context.sampleVision);
-  const uploadedBasis = frameCount > 0 ? `已接收上传视频并抽取 ${frameCount} 张关键帧` : "已接收上传视频元数据";
   context.generated.compositionPlan.rationale = [
-    context.sampleVision?.analysis
-      ? `已对样例视频抽取 ${context.sampleVision.frameCount ?? 0} 张关键帧，并完成真实视觉结构拆解。`
-      : `${uploadedBasis}；${publicModelFailureReason(context.sampleVision?.error)}，当前基于抽帧、视频元数据、本地结构规则和你的 Brief 生成迁移方案。`,
+    `已对样例视频抽取 ${context.sampleVision.frameCount ?? 0} 张关键帧，并完成真实视觉结构拆解。`,
     ...context.generated.compositionPlan.rationale
   ].slice(0, 5);
 }
@@ -890,8 +931,8 @@ function publicFallbackReason(reason: string) {
 
 function publicModelFailureReason(error: string | undefined) {
   if (!error) return "在线模型未返回有效视觉结果";
-  if (/401|api key|authentication|bearer/i.test(error)) return "在线模型鉴权失败，已切换本地结构规则";
-  if (/credential|not configured|replace_me/i.test(error)) return "在线模型凭证未配置，已切换本地结构规则";
+  if (/401|api key|authentication|bearer/i.test(error)) return "在线模型鉴权失败，未生成预设兜底结果";
+  if (/credential|not configured|replace_me/i.test(error)) return "在线模型凭证未配置，未生成预设兜底结果";
   if (/endpoint/i.test(error)) return "在线模型 endpoint 配置不可用";
   if (/fetch failed|network|ENOTFOUND|ECONN/i.test(error)) return "在线模型网络请求失败";
   if (/No frames|spawn|ffmpeg|frame/i.test(error)) return "视频关键帧抽取失败";
@@ -908,19 +949,6 @@ export function resolveOutputDir(value?: string) {
 
 function getFrameCount(video: VideoMetadata, model?: Awaited<ReturnType<typeof modelVideoUnderstandingAdapter.run>>) {
   return model?.frameCount ?? video.previewFrameDataUrls?.length ?? 0;
-}
-
-function fallbackAnalysisSummary(
-  video: VideoMetadata,
-  source: Pick<SourceInput, "prompt" | "productName" | "sellingPoints" | "targetAudience">,
-  frameCount: number
-) {
-  const basis = frameCount > 0 ? `已接收上传视频并抽取 ${frameCount} 张关键帧` : "已接收上传视频元数据";
-  return `${basis}；在线视觉模型不可用，当前按「${source.productName}」和你的目标 Brief 生成可迁移结构草案。`;
-}
-
-function fallbackRhythmPattern(video: VideoMetadata, source: Pick<SourceInput, "targetDurationSec">) {
-  return `按上传视频 ${Math.round(video.durationSec)} 秒素材建立 ${source.targetDurationSec || 18} 秒目标节奏，优先迁移开头、卖点推进和收口方法。`;
 }
 
 function hasUploadedVideo(video: VideoMetadata) {

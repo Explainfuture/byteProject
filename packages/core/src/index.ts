@@ -43,7 +43,7 @@ const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "fr
     track: "b2b_marketing",
     title: "B 端营销",
     description: "痛点场景、能力拆解、价值证明和咨询引导。",
-    renderer: "hyperframes"
+    renderer: "remotion"
   },
   {
     track: "talking_head_knowledge",
@@ -61,7 +61,7 @@ const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "fr
     track: "motion_graph_explainer",
     title: "MG 信息流",
     description: "标题卡、图文模块、卡点转场和流程化表达。",
-    renderer: "hyperframes"
+    renderer: "remotion"
   },
   {
     track: "event_promo",
@@ -85,7 +85,7 @@ const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "fr
     track: "cutting_beat",
     title: "剪辑卡点",
     description: "高密度切点、音乐节拍、转场组合和情绪递进。",
-    renderer: "hyperframes"
+    renderer: "remotion"
   }
 ];
 
@@ -429,13 +429,13 @@ function buildPreviewVariants(source: SourceInput, timeline: TimelineItem[]): Pr
 function buildRendererPrompt(source: SourceInput, script: string, timeline: TimelineItem[], variants: PreviewVariant[]) {
   const skills = selectedCreativeSkills(source);
   return JSON.stringify({
-    task: "Generate local Remotion or Hyperframes preview compositions from the transferred structure.",
+    task: "Generate local Remotion preview compositions from the transferred structure.",
     constraints: {
       maxDurationSec: 60,
       frameBudget: FRAME_BUDGET,
       preserveTimelineTiming: true,
       doNotCopySampleContent: true,
-      output: "playable local preview first; MP4 export is optional"
+      output: "playable local Remotion preview first; MP4 export is optional"
     },
     brief: {
       prompt: source.prompt,
@@ -449,7 +449,6 @@ function buildRendererPrompt(source: SourceInput, script: string, timeline: Time
       id: skill.id,
       name: skill.name,
       remotionUse: skill.remotionUse,
-      hyperframesUse: skill.hyperframesUse,
       guardrail: skill.guardrail
     })),
     script,

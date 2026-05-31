@@ -79,15 +79,6 @@ type StructureSkillPreset = {
   form: AppForm;
 };
 
-const strategies: Array<{ value: CreativeStrategy; label: string; hint: string }> = [
-  { value: "balanced", label: "均衡版", hint: "节奏、信息、转化都保持稳定。" },
-  { value: "high_click", label: "高点击版", hint: "开头更强，节奏更快，字幕更密集。" },
-  { value: "high_conversion", label: "高转化版", hint: "卖点更前置，CTA 更明确。" },
-  { value: "high_rhythm", label: "高节奏版", hint: "快切更多，卡点更明显。" },
-  { value: "premium", label: "高质感版", hint: "节奏更慢，包装更干净。" }
-];
-const primaryStrategies = strategies.filter((item) => item.value !== "premium");
-
 const resultTabs: Array<{ value: ResultTab; label: string; icon: ReactNode }> = [
   { value: "demo", label: "成片", icon: <FileVideo2 size={17} aria-hidden="true" /> },
   { value: "structure", label: "结构", icon: <Layers3 size={17} aria-hidden="true" /> },
@@ -476,18 +467,6 @@ export function App() {
     });
   }
 
-  function selectTemplateVideo(preset: StructureSkillPreset) {
-    setForm(preset.form);
-    setSampleVideo((previous) => {
-      if (previous?.previewUrl) URL.revokeObjectURL(previous.previewUrl);
-      return {
-        id: `template-${preset.id}`,
-        name: `${preset.name} 本地示例`,
-        templateTrack: preset.track
-      };
-    });
-  }
-
   async function generate(extraInstruction?: string, options?: { requireStartInputs?: boolean }) {
     if (!result || isGenerating) return;
     if (options?.requireStartInputs && !validateStartInputs()) {
@@ -508,14 +487,9 @@ export function App() {
     const sellingPoints = splitSellingPoints(form.sellingPoints);
     const inferredCreativeSkillIds = inferCreativeSkillIds({ ...form, sellingPoints });
     const settingPrompt = [
-      `开头方式：${form.hookStyle}`,
       `画幅：${form.aspectRatio}`,
-      `字幕：${form.subtitleStyle}`,
-      `节奏：${form.rhythm}`,
-      `收口：${form.ctaStyle}`,
-      `视觉风格：${form.visualStyle}`,
       `Agent 自动选择技能：${selectedCreativeSkillNames(inferredCreativeSkillIds).join(" / ")}`,
-      `本地预览：生成 10 个 Remotion/Hyperframes 风格赛道，单条不超过 60 秒，抽帧保持 4-16 张中等预算`
+      `本地预览：只渲染模型从本次视频分析出的 Remotion 方案，不生成预设赛道`
     ].join("\n");
     const basePrompt = `${form.prompt}\n\n视频期望参数：\n${settingPrompt}`;
     const finalPrompt = extraInstruction ? `${basePrompt}\n\n改片指令：${extraInstruction}` : basePrompt;
@@ -528,7 +502,7 @@ export function App() {
       targetAudience: form.targetAudience,
       tone: form.tone,
       targetDurationSec: form.targetDurationSec,
-      strategy: form.strategy
+      strategy: "balanced"
     };
 
     const [response] = await Promise.all([
@@ -581,7 +555,6 @@ export function App() {
           sampleVideo={sampleVideo}
           canGenerate={hasUploadedInputs && Boolean(form.prompt.trim())}
           onUpload={uploadVideo}
-          onSelectTemplate={selectTemplateVideo}
           onGenerate={() => generate(undefined, { requireStartInputs: true })}
           isGenerating={isGenerating}
         />
@@ -616,7 +589,6 @@ function StartScreen(props: {
   sampleVideo: UploadedVideo | null;
   canGenerate: boolean;
   onUpload: (file: File, role: UploadRole) => Promise<void>;
-  onSelectTemplate: (preset: StructureSkillPreset) => void;
   onGenerate: () => void;
   isGenerating: boolean;
 }) {
@@ -669,17 +641,22 @@ function StartScreen(props: {
               <span className={props.sampleVideo ? "ready" : ""}>{props.sampleVideo ? "视频已就绪" : "等待视频"}</span>
               <span className={props.sampleVideo ? "ready" : ""}>{props.sampleVideo ? "可开始抽帧拆解" : "等待抽帧"}</span>
             </div>
-            {!props.sampleVideo ? <TemplateVideoLibrary onSelect={props.onSelectTemplate} /> : null}
+            {!props.sampleVideo ? (
+              <div className="analysis-only-note">
+                <strong>等待真实视频</strong>
+                <span>上传后才会开始抽帧分析；不会用示例素材或预设模板生成结果。</span>
+              </div>
+            ) : null}
           </section>
 
           <section className="workspace-panel intent-panel" aria-label="AI 拆解与创作目标区">
-            <SectionHeading eyebrow="02 Brief" title="迁移目标" note="告诉 Agent 要把上传或示例视频迁移成什么成片方向。" />
+            <SectionHeading eyebrow="02 Brief" title="迁移目标" note="告诉 Agent 要把上传视频迁移成什么成片方向。" />
             <AutoCreativeSkillPanel form={props.form} />
             <SettingsPanel form={props.form} setForm={props.setForm} errors={props.validationErrors} />
           </section>
 
           <aside className="workspace-panel control-panel" aria-label="生成控制区">
-            <SectionHeading eyebrow="03 Generate" title="生成方案" note="生成 10 个本地 Remotion/Hyperframes 预览方案，目标时长不超过 1 分钟。" />
+            <SectionHeading eyebrow="03 Generate" title="生成方案" note="基于本次视频分析生成 Remotion 预览方案；没有分析结果时不输出预设。" />
             <details className="ai-plan-preview" aria-label="AI 方案预览">
               <summary>查看 AI 会分析什么</summary>
               <ul>
@@ -872,7 +849,6 @@ function SettingsPanel(props: { form: AppForm; setForm: (form: AppForm) => void;
 
 function GenerationControls(props: { form: AppForm; setForm: (form: AppForm) => void }) {
   const { form, setForm } = props;
-  const premiumStrategy = strategies.find((item) => item.value === "premium");
   return (
     <div className="generation-stack">
       <label className="field compact" htmlFor="targetDurationSec">
@@ -892,50 +868,10 @@ function GenerationControls(props: { form: AppForm; setForm: (form: AppForm) => 
 
       <OptionChips label="画幅" value={form.aspectRatio} options={aspectRatioOptions} onChange={(value) => setForm({ ...form, aspectRatio: value })} />
 
-      <div className="option-row">
-        <span>风格</span>
-        <div className="strategy-cards compact" role="radiogroup" aria-label="生成策略">
-          {primaryStrategies.map((item) => (
-            <button
-              key={item.value}
-              type="button"
-              className={form.strategy === item.value ? "active" : ""}
-              role="radio"
-              aria-checked={form.strategy === item.value}
-              title={item.hint}
-              onClick={() => setForm({ ...form, strategy: item.value })}
-            >
-              <strong>{item.label}</strong>
-            </button>
-          ))}
-        </div>
-      </div>
-
       <details className="advanced-settings">
-        <summary>更多设置</summary>
+        <summary>只保留分析约束</summary>
         <div className="advanced-stack">
-          <OptionChips label="开头方式" value={form.hookStyle} options={hookStyleOptions} onChange={(value) => setForm({ ...form, hookStyle: value })} />
-          <OptionChips label="字幕样式" value={form.subtitleStyle} options={subtitleStyleOptions} onChange={(value) => setForm({ ...form, subtitleStyle: value })} />
-          <OptionChips label="节奏偏好" value={form.rhythm} options={rhythmOptions} onChange={(value) => setForm({ ...form, rhythm: value })} />
-          <OptionChips label="收口方式" value={form.ctaStyle} options={ctaStyleOptions} onChange={(value) => setForm({ ...form, ctaStyle: value })} />
-          <OptionChips label="视觉风格" value={form.visualStyle} options={visualStyleOptions} onChange={(value) => setForm({ ...form, visualStyle: value })} />
-          {premiumStrategy ? (
-            <div className="option-row">
-              <span>更多策略</span>
-              <div className="strategy-cards single" role="radiogroup" aria-label="更多生成策略">
-                <button
-                  type="button"
-                  className={form.strategy === premiumStrategy.value ? "active" : ""}
-                  role="radio"
-                  aria-checked={form.strategy === premiumStrategy.value}
-                  title={premiumStrategy.hint}
-                  onClick={() => setForm({ ...form, strategy: premiumStrategy.value })}
-                >
-                  <strong>{premiumStrategy.label}</strong>
-                </button>
-              </div>
-            </div>
-          ) : null}
+          <p className="analysis-only-copy">开头、字幕、节奏、包装和 CTA 都由上传视频的抽帧分析与模型结构槽位决定，这里不提供固定预设。</p>
         </div>
       </details>
     </div>
@@ -1106,9 +1042,9 @@ function ResultWorkspace(props: {
           ) : null}
           {props.activeTab === "structure" ? <StructureMapping result={props.result} matches={props.matches} /> : null}
           {props.activeTab === "gaps" ? <GapDiagnosis slots={props.slots} matches={props.matches} /> : null}
-          {props.activeTab === "timeline" ? <TimelineEditor items={props.result.generated.timeline} /> : null}
+          {props.activeTab === "timeline" ? <TimelineEditor items={props.result.generated.timeline} slots={props.slots} /> : null}
           {props.activeTab === "packaging" ? <PackagingPanel result={props.result} /> : null}
-          {props.activeTab === "versions" ? <VersionCards activeStrategy={props.result.generated.compositionPlan.strategy} /> : null}
+          {props.activeTab === "versions" ? <VersionCards result={props.result} /> : null}
         </section>
 
         <aside className="preview-aside agent-aside">
@@ -1397,6 +1333,13 @@ function agentTurnIntro(turn: AgentTurn, activeStep: AgentToolStep, hasResult: b
 function StructureMapping(props: { result: RunResult; matches: SlotMatch[] }) {
   const sampleSlots = props.result.samples[0]?.slots ?? [];
   const timelineBySlot = new Map(props.result.generated.timeline.map((item) => [item.slotId, item]));
+  const rows = sampleSlots
+    .map((slot) => ({ slot, timeline: timelineBySlot.get(slot.id), match: props.matches.find((item) => item.slotId === slot.id) }))
+    .filter((row) => row.timeline);
+
+  if (!rows.length) {
+    return <EmptyResultState title="还没有可展示的结构映射" detail="模型需要先从样例视频里分析出结构槽位和 timeline；没有真实分析结果时不会补预设结构。" />;
+  }
 
   return (
     <section className="mapping-panel" aria-labelledby="mapping-title">
@@ -1407,13 +1350,11 @@ function StructureMapping(props: { result: RunResult; matches: SlotMatch[] }) {
           <span>新视频结构</span>
           <span>状态</span>
         </div>
-        {sampleSlots.map((slot) => {
-          const timeline = timelineBySlot.get(slot.id);
-          const match = props.matches.find((item) => item.slotId === slot.id);
+        {rows.map(({ slot, timeline, match }) => {
           return (
             <div className="mapping-row" key={slot.id}>
               <div>
-                <strong>{timeRange(timeline)} {segmentLabel(slot.segment)}</strong>
+                <strong>{timeRange(timeline)} {slotDisplayName(slot)}</strong>
                 <p>{shortIntent(slot.intent)}</p>
               </div>
               <ArrowRight className="mapping-arrow" size={18} aria-hidden="true" />
@@ -1433,7 +1374,15 @@ function StructureMapping(props: { result: RunResult; matches: SlotMatch[] }) {
 function GapDiagnosis(props: { slots: StructureSlot[]; matches: SlotMatch[] }) {
   const supported = props.matches.filter((item) => item.status === "matched").length;
   const gaps = props.matches.filter((item) => item.status !== "matched");
-  const visibleGaps = gaps.length ? gaps : props.matches.slice(0, 2);
+  const visibleGaps = gaps;
+
+  if (!props.matches.length) {
+    return <EmptyResultState title="还没有素材诊断" detail="等待模型返回 slotMatches 后再展示缺口；这里不会用默认缺口卡片占位。" />;
+  }
+
+  if (!visibleGaps.length) {
+    return <EmptyResultState title="本次没有识别到素材缺口" detail={`模型返回的 ${props.matches.length} 个槽位都已匹配素材。`} />;
+  }
 
   return (
     <section className="diagnosis-panel" aria-labelledby="diagnosis-title">
@@ -1461,16 +1410,22 @@ function GapDiagnosis(props: { slots: StructureSlot[]; matches: SlotMatch[] }) {
   );
 }
 
-function TimelineEditor(props: { items: TimelineItem[] }) {
+function TimelineEditor(props: { items: TimelineItem[]; slots: StructureSlot[] }) {
   const total = props.items.at(-1)?.endSec ?? 18;
+  const slotById = new Map(props.slots.map((slot) => [slot.id, slot]));
+
+  if (!props.items.length) {
+    return <EmptyResultState title="还没有编辑时间线" detail="模型需要返回可执行 timeline 后才展示轨道；不会用 Hook/商品展示等默认轨道占位。" />;
+  }
+
   return (
     <section className="timeline-panel" aria-labelledby="timeline-title">
       <PanelTitle icon={<Clapperboard size={18} aria-hidden="true" />} title="编辑时间线" note="轻量展示镜头、字幕、包装、音频四条轨道。" id="timeline-title" />
       <div className="light-timeline" style={{ "--timeline-total": total } as CSSProperties}>
-        <TimelineTrack total={total} label="镜头轨" items={props.items.map((item) => ({ id: item.id, start: item.startSec, end: item.endSec, text: segmentLabelFromSlotId(item.slotId) }))} />
+        <TimelineTrack total={total} label="镜头轨" items={props.items.map((item) => ({ id: item.id, start: item.startSec, end: item.endSec, text: slotById.get(item.slotId) ? slotDisplayName(slotById.get(item.slotId)!) : item.caption }))} />
         <TimelineTrack total={total} label="字幕轨" items={props.items.map((item) => ({ id: item.id, start: item.startSec, end: item.endSec, text: item.caption }))} />
-        <TimelineTrack total={total} label="包装轨" items={props.items.map((item) => ({ id: item.id, start: item.startSec, end: item.endSec, text: item.packaging[0] ?? "包装卡片" }))} />
-        <TimelineTrack total={total} label="音频轨" items={props.items.map((item) => ({ id: item.id, start: item.startSec, end: item.endSec, text: item.beatHint ?? "卡点" }))} />
+        <TimelineTrack total={total} label="包装轨" items={props.items.map((item) => ({ id: item.id, start: item.startSec, end: item.endSec, text: item.packaging[0] ?? "" }))} />
+        <TimelineTrack total={total} label="音频轨" items={props.items.map((item) => ({ id: item.id, start: item.startSec, end: item.endSec, text: item.beatHint ?? "" }))} />
       </div>
     </section>
   );
@@ -1499,9 +1454,10 @@ function TimelineTrack(props: { total: number; label: string; items: Array<{ id:
 }
 
 function PackagingPanel(props: { result: RunResult }) {
-  const suggestions = props.result.generated.packagingSuggestions.length
-    ? props.result.generated.packagingSuggestions
-    : ["大字标题条", "卖点三连卡片", "高亮贴纸", "CTA 按钮卡"];
+  if (!props.result.generated.packagingSuggestions.length) {
+    return <EmptyResultState title="还没有包装建议" detail="等待模型基于样例分析生成包装指令；不会补大字标题条、卖点卡片等默认建议。" />;
+  }
+  const suggestions = props.result.generated.packagingSuggestions;
   return (
     <section className="packaging-panel" aria-labelledby="packaging-title">
       <PanelTitle icon={<PackageCheck size={18} aria-hidden="true" />} title="包装建议" note="用于补足表达，不替代视频主体。" id="packaging-title" />
@@ -1518,15 +1474,19 @@ function PackagingPanel(props: { result: RunResult }) {
   );
 }
 
-function VersionCards(props: { activeStrategy: CreativeStrategy }) {
+function VersionCards(props: { result: RunResult }) {
+  const variants = props.result.generated.previewVariants;
+  if (!variants.length) {
+    return <EmptyResultState title="没有模型派生版本" detail="版本必须由本次视频分析和模型方案生成；不会展示高点击/高转化等固定预设。" />;
+  }
   return (
     <section className="versions-panel" aria-labelledby="versions-title">
-      <PanelTitle icon={<Sparkles size={18} aria-hidden="true" />} title="版本选择" note="同一内容输出不同创作策略。" id="versions-title" />
+      <PanelTitle icon={<Sparkles size={18} aria-hidden="true" />} title="模型派生版本" note="只展示本次分析返回的可渲染版本。" id="versions-title" />
       <div className="version-grid">
-        {strategies.filter((item) => item.value !== "balanced").map((item) => (
-          <article key={item.value} className={props.activeStrategy === item.value ? "active" : ""}>
-            <h3>{item.label}</h3>
-            <p>{item.hint}</p>
+        {variants.map((item) => (
+          <article key={item.id} className="active">
+            <h3>{item.title}</h3>
+            <p>{item.description || item.promptHint}</p>
           </article>
         ))}
       </div>
@@ -1563,7 +1523,7 @@ function PhonePreview(props: { result: RunResult; sampleVideo: UploadedVideo | n
           />
         </div>
       )}
-      <p>{props.sampleVideo ? "右侧保留上传素材回放；成片区展示 10 个本地预览赛道。" : "右侧为 Remotion 竖屏预览；后续可接入服务端 MP4 渲染。"}</p>
+      <p>{props.sampleVideo ? "右侧保留上传素材回放；成片区只展示模型分析派生的预览。" : "右侧为 Remotion 竖屏预览；后续可接入服务端 MP4 渲染。"}</p>
     </section>
   );
 }
@@ -1605,6 +1565,18 @@ function PanelTitle(props: { icon: ReactNode; title: string; note: string; id: s
         <h2 id={props.id}>{props.title}</h2>
       </div>
     </div>
+  );
+}
+
+function EmptyResultState(props: { title: string; detail: string }) {
+  return (
+    <section className="empty-result-state" aria-live="polite">
+      <AlertTriangle size={20} aria-hidden="true" />
+      <div>
+        <h2>{props.title}</h2>
+        <p>{props.detail}</p>
+      </div>
+    </section>
   );
 }
 
@@ -1973,6 +1945,13 @@ function segmentLabel(segment: StructureSlot["segment"]) {
     offer: "利益点",
     cta: "CTA 收口"
   }[segment];
+}
+
+function slotDisplayName(slot: StructureSlot) {
+  const intent = shortIntent(slot.intent);
+  if (intent) return intent;
+  const packaging = slot.packagingHints[0] ? shortIntent(slot.packagingHints[0]) : "";
+  return packaging || segmentLabel(slot.segment);
 }
 
 function segmentLabelFromSlotId(slotId: string) {
