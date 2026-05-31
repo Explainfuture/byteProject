@@ -28,9 +28,12 @@ page.on("response", async (response) => {
 await page.goto(baseUrl, { waitUntil: "networkidle" });
 
 const firstPrompt =
-  "请把这条视频拆解成一个 AI 短视频结构迁移样例：先识别画面中的科技感、空间关系、镜头节奏、字幕/包装/转场方法，再迁移成“SD2Lite 视频创作 Agent”的新品发布短视频方案。不要复制原片内容。";
+  "请把这条视频拆解成一个 AI 短视频结构迁移样例：先识别画面中的科技感、空间关系、镜头节奏、字幕/包装/转场方法，再迁移成“Doubao-Seed 视频创作 Agent”的新品发布短视频方案。不要复制原片内容。";
 await page.locator("#targetPrompt").fill(firstPrompt);
-await page.locator("#productName").fill("SD2Lite 视频创作 Agent");
+await page.locator(".brief-details").evaluate((node) => {
+  node.open = true;
+});
+await page.locator("#productName").fill("Doubao-Seed 视频创作 Agent");
 await page.locator("#targetAudience").fill("AI 创作者、短视频运营、参赛评委");
 await page.locator("#sellingPoints").fill("单视频抽帧理解\n结构迁移而非复制\n素材不足自动补全\n可对话式迭代方案");
 
@@ -67,7 +70,10 @@ const domMetrics = {
   userBubbleCount: await page.locator(".chat-row.user .agent-bubble").count(),
   aiBubbleCount: await page.locator(".chat-row.ai .agent-bubble").count(),
   toolCallCount: await page.locator(".agent-tool-call").count(),
+  toolStackCount: await page.locator(".agent-tool-stack").count(),
+  runningToolCount: await page.locator(".agent-tool-call.running").count(),
   fallbackToolCount: await page.locator(".agent-tool-call.fallback").count(),
+  headingNoteCount: await page.locator(".studio-subtitle, .section-heading p, .result-header p, .panel-title p, .demo-explain > p, .source-video-card header span").count(),
   revisionInputCount: await page.locator("#revisionPrompt").count(),
   uploadedVideoNameVisible: await page.getByText(basename(videoPath)).count()
 };
@@ -148,7 +154,7 @@ function evaluateResult({ uploadJson, firstGenerateJson, revisionGenerateJson, d
   if (frameCount < 1) blockers.push("no keyframe count reached the public result");
   if (!prompt.includes(firstPrompt.slice(0, 18))) blockers.push("first prompt is missing from generated source prompt");
   if (!prompt.includes("改片指令") || !prompt.includes(followUpPrompt.slice(0, 18))) blockers.push("follow-up Agent message was not included in regeneration prompt");
-  if (!allText.includes("SD2Lite 视频创作 Agent")) blockers.push("custom product/brief did not survive generation");
+  if (!allText.includes("Doubao-Seed 视频创作 Agent")) blockers.push("custom product/brief did not survive generation");
   if (allText.includes("智能随行杯") || allText.includes("出门总是忘记喝水吗")) blockers.push("default mock copy leaked into real video result");
   if (timeline.length < 5) blockers.push("timeline has fewer than 5 structure items");
   if (storyboard.length < 5) blockers.push("storyboard has fewer than 5 items");
@@ -158,10 +164,14 @@ function evaluateResult({ uploadJson, firstGenerateJson, revisionGenerateJson, d
     blockers.push("short source video did not produce any weak/missing material gap diagnosis");
   }
   if (packaging.length < 3) blockers.push("packaging suggestions are too thin");
+  if ((generated?.previewVariants?.length ?? 0) !== 10) blockers.push("generated result did not expose 10 preview style tracks");
+  if ((generated?.previewVariants ?? []).some((variant) => variant.targetDurationSec > 60)) blockers.push("preview variant exceeded 60 seconds");
   if (trace.length < 2) blockers.push("agent trace is missing tool evidence");
   if (domMetrics.videoAgentPanelCount !== 1) blockers.push("Agent panel did not render");
   if (domMetrics.userBubbleCount < 2) blockers.push("Agent conversation did not show initial + follow-up user turns");
-  if (domMetrics.toolCallCount < 12) blockers.push("Agent tool flow did not render for both turns");
+  if (domMetrics.toolCallCount !== 1 || domMetrics.toolStackCount !== 1) blockers.push("Agent panel should render exactly one current tool card");
+  if (domMetrics.runningToolCount !== 0) blockers.push("completed Agent tool card is still marked as running");
+  if (domMetrics.headingNoteCount !== 0) blockers.push("large heading helper notes should not render");
   if (domMetrics.revisionInputCount !== 1) blockers.push("Agent follow-up input is missing");
 
   if (result?.agentMode !== "tool-calling") warnings.push(`agent mode is ${result?.agentMode}; acceptable only if fallback is explicit`);

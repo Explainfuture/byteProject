@@ -1,7 +1,8 @@
 import type { CSSProperties, ReactNode } from "react";
 import { AbsoluteFill, Sequence, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
+import type { VideoStyleTrack } from "@byteproject/shared";
 
-export type FakeVideoVariant = "click" | "conversion";
+export type FakeVideoVariant = VideoStyleTrack;
 
 export const REMOTION_FAKE_VIDEO_FPS = 30;
 export const REMOTION_FAKE_VIDEO_FRAMES = 540;
@@ -19,56 +20,131 @@ const baseFont =
   '"Inter", "Geist", "SF Pro Text", "SF Pro Display", "Alibaba PuHuiTi", "HarmonyOS Sans SC", "Source Han Sans SC", "Noto Sans SC", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif';
 
 const variantCopy = {
-  click: {
-    eyebrow: "高点击版",
-    hook: "通勤路上总忘喝水？",
-    hookSub: "这个小提醒，比你想象中更懂你",
+  ecommerce_burst: {
+    eyebrow: "电商爆品",
+    hook: "3 秒看懂值不值",
+    hookSub: "卖点前置，节奏更快",
     tone: "#51406f",
     accent: "#c58a3a",
     cta: "先收藏，对照清单再选",
-    closing: "3 秒看懂随行杯怎么挑"
+    closing: "适合直接转化的爆品节奏"
   },
-  conversion: {
-    eyebrow: "高转化版",
-    hook: "一只杯子，解决三件小事",
-    hookSub: "看余量、提醒喝水、轻松带走",
+  review_contrast: {
+    eyebrow: "测评对比",
+    hook: "用过才知道差别",
+    hookSub: "问题、对比、结论分层推进",
+    tone: "#244f5a",
+    accent: "#d6a23f",
+    cta: "看完再决定",
+    closing: "用对比结构强化可信度"
+  },
+  b2b_marketing: {
+    eyebrow: "B 端营销",
+    hook: "团队效率卡在哪？",
+    hookSub: "痛点到方案，再到收益",
+    tone: "#2f4858",
+    accent: "#7bbf9e",
+    cta: "预约一次演示",
+    closing: "把能力讲成可采购的价值"
+  },
+  talking_head_knowledge: {
+    eyebrow: "口播知识",
+    hook: "一个方法讲清楚",
+    hookSub: "观点开场，三段解释",
     tone: "#3d2f55",
-    accent: "#b47a2b",
-    cta: "现在收藏，按需选择",
-    closing: "适合通勤 / 健身 / 出行"
+    accent: "#c58a3a",
+    cta: "评论区继续拆",
+    closing: "结构清楚，适合讲解内容"
+  },
+  vlog_lifestyle: {
+    eyebrow: "生活 Vlog",
+    hook: "今天的状态轻一点",
+    hookSub: "场景代入，自然转场",
+    tone: "#45624e",
+    accent: "#d2a857",
+    cta: "收藏这个场景",
+    closing: "把卖点藏进生活片段里"
+  },
+  motion_graph_explainer: {
+    eyebrow: "MG 信息流",
+    hook: "流程一眼看懂",
+    hookSub: "标题卡、图文模块、卡点切换",
+    tone: "#315b7d",
+    accent: "#e0b84f",
+    cta: "保存这套流程",
+    closing: "低素材也能解释清楚"
+  },
+  event_promo: {
+    eyebrow: "活动促销",
+    hook: "福利先看这一条",
+    hookSub: "利益点前置，强 CTA 收口",
+    tone: "#6a3f47",
+    accent: "#e0a13d",
+    cta: "现在领券再看",
+    closing: "限时信息要被快速看见"
+  },
+  tutorial_steps: {
+    eyebrow: "教程步骤",
+    hook: "照着做就行",
+    hookSub: "步骤拆解，字幕序号",
+    tone: "#365760",
+    accent: "#caa24c",
+    cta: "保存后跟着做",
+    closing: "每一步都给清楚落点"
+  },
+  premium_brand: {
+    eyebrow: "品牌质感",
+    hook: "少一点，更高级",
+    hookSub: "慢节奏、留白和克制字幕",
+    tone: "#262a2e",
+    accent: "#bfa56a",
+    cta: "了解完整系列",
+    closing: "用节奏和留白传达质感"
+  },
+  cutting_beat: {
+    eyebrow: "剪辑卡点",
+    hook: "跟着节拍切",
+    hookSub: "快切、推近、节奏递进",
+    tone: "#41366f",
+    accent: "#df8d46",
+    cta: "收藏这套卡点",
+    closing: "用音乐切点带出情绪"
   }
 } satisfies Record<FakeVideoVariant, Record<string, string>>;
 
 export function MarketingFakeVideo(props: FakeVideoProps) {
   const frame = useCurrentFrame();
+  const { durationInFrames } = useVideoConfig();
   const copy = variantCopy[props.variant];
+  const cuts = sceneCuts(durationInFrames);
 
   return (
     <AbsoluteFill style={canvasStyle(copy.tone)}>
       <BackgroundMotion tone={copy.tone} accent={copy.accent} />
-      <Sequence from={0} durationInFrames={90}>
+      <Sequence from={0} durationInFrames={cuts.hook}>
         <HookScene copy={copy} />
       </Sequence>
-      <Sequence from={90} durationInFrames={120}>
+      <Sequence from={cuts.hook} durationInFrames={cuts.product}>
         <ProductScene copy={copy} productName={props.productName} points={props.points} />
       </Sequence>
-      <Sequence from={210} durationInFrames={150}>
+      <Sequence from={cuts.hook + cuts.product} durationInFrames={cuts.useCase}>
         <UseCaseScene copy={copy} audience={props.audience} />
       </Sequence>
-      <Sequence from={360} durationInFrames={90}>
+      <Sequence from={cuts.hook + cuts.product + cuts.useCase} durationInFrames={cuts.benefit}>
         <BenefitScene copy={copy} points={props.points} />
       </Sequence>
-      <Sequence from={450} durationInFrames={90}>
+      <Sequence from={cuts.hook + cuts.product + cuts.useCase + cuts.benefit} durationInFrames={cuts.cta}>
         <CtaScene copy={copy} productName={props.productName} />
       </Sequence>
-      <BeatRail frame={frame} tone={copy.tone} />
+      <BeatRail frame={frame} tone={copy.tone} beats={[0, cuts.hook, cuts.hook + cuts.product, cuts.hook + cuts.product + cuts.useCase, cuts.hook + cuts.product + cuts.useCase + cuts.benefit]} />
     </AbsoluteFill>
   );
 }
 
 function BackgroundMotion(props: { tone: string; accent: string }) {
   const frame = useCurrentFrame();
-  const drift = interpolate(frame, [0, REMOTION_FAKE_VIDEO_FRAMES], [-80, 80]);
+  const { durationInFrames } = useVideoConfig();
+  const drift = interpolate(frame, [0, durationInFrames], [-80, 80]);
   const pulse = interpolate(Math.sin(frame / 18), [-1, 1], [0.52, 0.78]);
 
   return (
@@ -211,11 +287,10 @@ function CtaScene(props: { copy: Record<string, string>; productName: string }) 
   );
 }
 
-function BeatRail(props: { frame: number; tone: string }) {
-  const beats = [0, 90, 210, 360, 450];
+function BeatRail(props: { frame: number; tone: string; beats: number[] }) {
   return (
     <div style={beatRailStyle}>
-      {beats.map((beat, index) => (
+      {props.beats.map((beat, index) => (
         <span
           key={beat}
           style={{
@@ -228,6 +303,16 @@ function BeatRail(props: { frame: number; tone: string }) {
       ))}
     </div>
   );
+}
+
+function sceneCuts(durationInFrames: number) {
+  const safeTotal = Math.max(150, durationInFrames);
+  const hook = Math.max(45, Math.round(safeTotal * 0.17));
+  const product = Math.max(60, Math.round(safeTotal * 0.22));
+  const useCase = Math.max(75, Math.round(safeTotal * 0.28));
+  const benefit = Math.max(45, Math.round(safeTotal * 0.17));
+  const cta = Math.max(45, safeTotal - hook - product - useCase - benefit);
+  return { hook, product, useCase, benefit, cta };
 }
 
 function ProductCup(props: { tone: string; lift: number }) {

@@ -11,7 +11,8 @@
 - 长视频候选片段粗切 mock/规则链路
 - 槽位匹配、素材缺口识别、补全策略
 - Composition Plan、脚本、分镜、时间线生成
-- 低保真 HTML 成片预览，后续可替换为 Remotion MP4 渲染
+- 10 个本地 Remotion/HyperFrames 风格赛道预览，单条控制在 60 秒内
+- Doubao-Seed-2.0-lite / Ark-compatible 模型适配器，用于抽帧分析、脚本增强和渲染提示生成
 - 无 API key 时可完整跑通 demo
 
 ## 本地运行
@@ -54,4 +55,3 @@ docs/AI_USAGE.md  AI 辅助工具使用说明
 ## 环境变量
 
 复制 `env.example` 为 `.env`，替换自己的 key。仓库不会提交真实密钥。
-

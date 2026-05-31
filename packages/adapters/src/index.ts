@@ -2,11 +2,14 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
-import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, SampleAnalysis, SourceInput, TimelineItem, VideoMetadata } from "@byteproject/shared";
+import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, SampleAnalysis, SourceInput, VideoMetadata } from "@byteproject/shared";
 
 const require = createRequire(import.meta.url);
 const bundledFfmpegPath = require("ffmpeg-static") as string | null;
 const bundledFfprobePath = (require("ffprobe-static") as { path?: string }).path;
+const DEFAULT_SECONDS_PER_VISION_FRAME = 4;
+const DEFAULT_MIN_VISION_FRAMES = 4;
+const DEFAULT_MAX_VISION_FRAMES = 16;
 
 export type ToolProtocol<I, O> = {
   name: string;
@@ -89,7 +92,7 @@ export const remotionStoryboardAdapter: ToolProtocol<
     await mkdir(input.outputDir, { recursive: true });
     const fileName = `${input.plan.id}.html`;
     const outputPath = join(input.outputDir, fileName);
-    await writeFile(outputPath, renderTimelineHtml(input.plan.timeline, input.plan.script), "utf8");
+    await writeFile(outputPath, renderTimelineHtml(input.plan), "utf8");
     return {
       path: outputPath,
       url: `/outputs/${fileName}`
@@ -149,7 +152,7 @@ export const modelVideoUnderstandingAdapter: ToolProtocol<
       return { provider: "mock", error: "Ark credentials are not configured." };
     }
 
-    const uploadedFrames = normalizeUploadedFrameDataUrls(input.video.previewFrameDataUrls);
+    const uploadedFrames = normalizeUploadedFrameDataUrls(input.video.previewFrameDataUrls, input.video.durationSec);
     if (uploadedFrames.length) {
       return requestVideoUnderstanding(input, uploadedFrames);
     }
@@ -158,7 +161,7 @@ export const modelVideoUnderstandingAdapter: ToolProtocol<
       return { provider: "mock", model, error: "Video localPath is missing; cannot sample visual frames." };
     }
 
-    const sampled = await sampleVideoFrames(input.video.localPath, input.video.id);
+    const sampled = await sampleVideoFrames(input.video.localPath, input.video.id, input.video.durationSec);
     if (!sampled.frames.length) {
       return { provider: "ark", model, error: sampled.error ?? "No frames were extracted from the uploaded video." };
     }
@@ -177,6 +180,7 @@ export type ModelEnhancementInput = {
 
 export type ModelEnhancement = {
   script?: string;
+  rendererPrompt?: string;
   timeline?: Array<{
     id?: string;
     slotId?: string;
@@ -260,8 +264,8 @@ export const modelCreativeAdapter: ToolProtocol<
   }
 };
 
-function renderTimelineHtml(timeline: TimelineItem[], script: string) {
-  const blocks = timeline
+function renderTimelineHtml(plan: GeneratedPlan) {
+  const blocks = plan.timeline
     .map(
       (item) => `
         <section class="shot">
@@ -273,6 +277,17 @@ function renderTimelineHtml(timeline: TimelineItem[], script: string) {
     )
     .join("");
 
+  const variants = plan.previewVariants
+    .map(
+      (variant) => `
+        <article class="variant">
+          <strong>${escapeHtml(variant.title)}</strong>
+          <span>${escapeHtml(variant.renderer)}</span>
+          <p>${escapeHtml(variant.description)}</p>
+        </article>`
+    )
+    .join("");
+
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -281,17 +296,23 @@ function renderTimelineHtml(timeline: TimelineItem[], script: string) {
   <title>低保真成片 Demo</title>
   <style>
     body { margin: 0; background: #101113; color: #f7f1e8; font-family: "Microsoft YaHei", sans-serif; }
-    main { width: min(420px, 100vw); margin: 0 auto; min-height: 100vh; background: #191b1f; }
+    main { width: min(980px, 100vw); margin: 0 auto; min-height: 100vh; background: #191b1f; }
+    .phone { width: min(420px, 100%); margin: 0 auto; }
     .shot { min-height: 220px; padding: 28px; border-bottom: 1px solid rgba(255,255,255,.12); display: grid; align-content: center; gap: 12px; }
     .time { color: #70e0c1; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
     h2 { font-size: 34px; line-height: 1.08; margin: 0; }
     p { margin: 0; color: #d4d7dc; line-height: 1.6; }
     span { color: #ffcf66; font-size: 13px; }
+    .variants { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; padding: 24px; border-bottom: 1px solid rgba(255,255,255,.12); }
+    .variant { min-height: 120px; padding: 16px; border: 1px solid rgba(255,255,255,.14); border-radius: 14px; background: rgba(255,255,255,.06); }
+    .variant strong { display: block; color: #fff; font-size: 18px; }
+    .variant span { display: inline-block; margin-top: 8px; color: #70e0c1; }
+    .variant p { margin: 10px 0 0; color: #d4d7dc; font-size: 13px; line-height: 1.5; }
     pre { white-space: pre-wrap; padding: 24px; color: #b7bec9; }
   </style>
 </head>
 <body>
-  <main>${blocks}<pre>${escapeHtml(script)}</pre></main>
+  <main><section class="variants">${variants}</section><div class="phone">${blocks}</div><pre>${escapeHtml(plan.script)}</pre></main>
 </body>
 </html>`;
 }
@@ -343,6 +364,7 @@ function buildCreativeMessages(input: ModelEnhancementInput) {
           "基于样例结构、新素材槽位匹配和知识原子，增强新视频方案。保持 timeline 的 id/slotId/startSec/endSec 不变，只改 caption、packaging、transition、beatHint、script、rationale。不要输出 storyboard。",
         outputSchema: {
           script: "string，中文，按段落输出，每段以【Hook/展开/证明/卖点/CTA】开头",
+          rendererPrompt: "string，给 Remotion/Hyperframes 的结构化渲染提示，说明 10 个赛道预览如何按 timeline 拼接，时长必须小于等于 60 秒",
           timeline: [
             {
               id: "必须使用输入 timeline 的 id",
@@ -361,6 +383,8 @@ function buildCreativeMessages(input: ModelEnhancementInput) {
         slots,
         slotMatches: matches,
         currentTimeline,
+        rendererPrompt: input.plan.rendererPrompt,
+        previewVariants: input.plan.previewVariants,
         materialSegments: input.materialSegments,
         knowledgeAtoms: knowledge
       })
@@ -385,6 +409,8 @@ function buildVideoUnderstandingMessages(input: ModelVideoUnderstandingInput, fr
               input.role === "sample"
                 ? "根据这些从样例视频抽取的关键帧，拆解爆款短视频结构。输出脚本段落、Hook/Body/Proof/Offer/CTA 槽位、节奏、包装、字幕/语音概览。"
                 : "根据这些从用户素材视频抽取的关键帧，识别可用于重构短视频的素材类型、画面内容和缺口。",
+            frameSampling:
+              `采用中等抽帧预算：${DEFAULT_MIN_VISION_FRAMES}-${DEFAULT_MAX_VISION_FRAMES} 张，约每 ${DEFAULT_SECONDS_PER_VISION_FRAME} 秒一帧；不要假设未看到的细节。`,
             video: {
               fileName: input.video.fileName,
               durationSec: input.video.durationSec,
@@ -475,9 +501,9 @@ async function requestVideoUnderstanding(input: ModelVideoUnderstandingInput, fr
   }
 }
 
-async function sampleVideoFrames(filePath: string, videoId: string) {
+async function sampleVideoFrames(filePath: string, videoId: string, durationSec?: number) {
   const ffmpeg = resolveFfmpegPath();
-  const frameCount = Number(process.env.VISION_FRAME_COUNT ?? 6);
+  const frameCount = resolveVisionFrameCount(durationSec);
   const tmpRoot = resolve(process.env.TMP_DIR ?? "data/tmp");
   const outputDir = join(tmpRoot, `vision-${videoId}-${Date.now()}`);
   await mkdir(outputDir, { recursive: true });
@@ -503,12 +529,24 @@ async function sampleVideoFrames(filePath: string, videoId: string) {
   }
 }
 
-function normalizeUploadedFrameDataUrls(value: string[] | undefined) {
+function normalizeUploadedFrameDataUrls(value: string[] | undefined, durationSec?: number) {
   if (!Array.isArray(value)) return [];
+  const frameCount = resolveVisionFrameCount(durationSec);
   return value
     .map((frame) => frame.match(/^data:image\/(?:jpeg|png);base64,(.+)$/)?.[1])
     .filter((frame): frame is string => Boolean(frame))
-    .slice(0, Number(process.env.VISION_FRAME_COUNT ?? 6));
+    .slice(0, frameCount);
+}
+
+function resolveVisionFrameCount(durationSec: number | undefined) {
+  const configuredMin = Number(process.env.VISION_MIN_FRAME_COUNT ?? DEFAULT_MIN_VISION_FRAMES);
+  const configuredMax = Number(process.env.VISION_MAX_FRAME_COUNT ?? DEFAULT_MAX_VISION_FRAMES);
+  const configuredSecondsPerFrame = Number(process.env.VISION_SECONDS_PER_FRAME ?? DEFAULT_SECONDS_PER_VISION_FRAME);
+  const minFrames = Number.isFinite(configuredMin) && configuredMin > 0 ? Math.round(configuredMin) : DEFAULT_MIN_VISION_FRAMES;
+  const maxFrames = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.max(minFrames, Math.round(configuredMax)) : DEFAULT_MAX_VISION_FRAMES;
+  const secondsPerFrame = Number.isFinite(configuredSecondsPerFrame) && configuredSecondsPerFrame > 0 ? configuredSecondsPerFrame : DEFAULT_SECONDS_PER_VISION_FRAME;
+  const safeDuration = Number.isFinite(durationSec) && Number(durationSec) > 0 ? Number(durationSec) : 18;
+  return Math.max(minFrames, Math.min(maxFrames, Math.ceil(safeDuration / secondsPerFrame)));
 }
 
 function resolveFfmpegPath() {
@@ -591,6 +629,7 @@ function normalizeEnhancement(value: unknown): ModelEnhancement {
   const candidate = value as ModelEnhancement;
   return {
     script: typeof candidate.script === "string" ? candidate.script : undefined,
+    rendererPrompt: typeof candidate.rendererPrompt === "string" ? candidate.rendererPrompt : undefined,
     timeline: Array.isArray(candidate.timeline) ? candidate.timeline : undefined,
     storyboard: Array.isArray(candidate.storyboard) ? candidate.storyboard : undefined,
     packagingSuggestions: cleanStringList(candidate.packagingSuggestions),

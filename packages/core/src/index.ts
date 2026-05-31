@@ -6,6 +6,7 @@ import type {
   GapStrategy,
   KnowledgeEntry,
   MaterialSegment,
+  PreviewVariant,
   RunResult,
   SampleAnalysis,
   SlotMatch,
@@ -17,6 +18,75 @@ import type {
   TranscriptLine,
   VideoMetadata
 } from "@byteproject/shared";
+
+const FRAME_BUDGET = {
+  minFrames: 4,
+  maxFrames: 16,
+  secondsPerFrame: 4
+} as const;
+
+const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "frameBudget" | "promptHint">> = [
+  {
+    track: "ecommerce_burst",
+    title: "电商爆品快切",
+    description: "强 Hook、商品亮相、卖点三连和 CTA 收口。",
+    renderer: "remotion"
+  },
+  {
+    track: "review_contrast",
+    title: "测评对比",
+    description: "问题开场、对照证明、真实感字幕和推荐收口。",
+    renderer: "remotion"
+  },
+  {
+    track: "b2b_marketing",
+    title: "B 端营销",
+    description: "痛点场景、能力拆解、价值证明和咨询引导。",
+    renderer: "hyperframes"
+  },
+  {
+    track: "talking_head_knowledge",
+    title: "口播知识",
+    description: "观点 Hook、三段解释、关键词强调和互动结尾。",
+    renderer: "remotion"
+  },
+  {
+    track: "vlog_lifestyle",
+    title: "生活方式 Vlog",
+    description: "场景代入、轻字幕、节奏转场和自然 CTA。",
+    renderer: "remotion"
+  },
+  {
+    track: "motion_graph_explainer",
+    title: "MG 信息流",
+    description: "标题卡、图文模块、卡点转场和流程化表达。",
+    renderer: "hyperframes"
+  },
+  {
+    track: "event_promo",
+    title: "活动促销",
+    description: "优惠前置、倒计时包装、利益点堆叠和强行动。",
+    renderer: "remotion"
+  },
+  {
+    track: "tutorial_steps",
+    title: "教程步骤",
+    description: "步骤拆解、操作镜头、字幕序号和总结卡片。",
+    renderer: "remotion"
+  },
+  {
+    track: "premium_brand",
+    title: "品牌质感",
+    description: "慢节奏镜头、留白字幕、质感包装和品牌收束。",
+    renderer: "remotion"
+  },
+  {
+    track: "cutting_beat",
+    title: "剪辑卡点",
+    description: "高密度切点、音乐节拍、转场组合和情绪递进。",
+    renderer: "hyperframes"
+  }
+];
 
 const segmentNames: Record<StructureSlot["segment"], string> = {
   hook: "开头吸引",
@@ -66,7 +136,7 @@ type AnalysisOptions = {
 type BriefDrivenTranscriptSource = Pick<SourceInput, "prompt" | "productName" | "sellingPoints" | "targetAudience" | "tone" | "targetDurationSec">;
 
 export function createBriefDrivenTranscript(source: Partial<BriefDrivenTranscriptSource>, video?: Pick<VideoMetadata, "fileName" | "durationSec" | "width" | "height">): TranscriptLine[] {
-  const total = clamp(source.targetDurationSec || video?.durationSec || 18, 6, 180);
+  const total = clamp(source.targetDurationSec || video?.durationSec || 18, 6, 60);
   const cuts = [0, total * 0.12, total * 0.3, total * 0.7, total * 0.86, total].map((value) => Number(value.toFixed(1)));
   const productName = cleanBriefText(source.productName) || "待定商品";
   const targetAudience = cleanBriefText(source.targetAudience) || "目标用户";
@@ -280,6 +350,8 @@ export function composePlan(input: {
   const timeline = buildTimeline(slots, matches, input.source, selectedAtoms);
   const storyboard = buildStoryboard(slots, timeline, matches);
   const script = buildScript(input.source, slots, matches);
+  const previewVariants = buildPreviewVariants(input.source, timeline);
+  const rendererPrompt = buildRendererPrompt(input.source, script, timeline, previewVariants);
 
   return {
     id: `plan-${Date.now()}`,
@@ -292,6 +364,8 @@ export function composePlan(input: {
       "中段每个卖点配一张卖点卡片，弱素材片段用局部放大。",
       "结尾使用按钮式 CTA 和 0.5 秒定格。"
     ],
+    rendererPrompt,
+    previewVariants,
     demo: {
       status: "mock_ready",
       note: "已生成 Remotion timeline 草案；无渲染器时使用前端低保真预览。"
@@ -308,7 +382,7 @@ function selectAtoms(atoms: TechniqueAtom[], strategy: SourceInput["strategy"]) 
 }
 
 function buildTimeline(slots: StructureSlot[], matches: SlotMatch[], source: SourceInput, atoms: TechniqueAtom[]): TimelineItem[] {
-  const total = clamp(source.targetDurationSec || 18, 10, 24);
+  const total = clamp(source.targetDurationSec || 18, 10, 60);
   const slotDurationSum = slots.reduce((sum, slot) => sum + slot.durationSec, 0);
   let cursor = 0;
 
@@ -331,6 +405,51 @@ function buildTimeline(slots: StructureSlot[], matches: SlotMatch[], source: Sou
       transition: slot.rhythmHint === "fast" ? "快速切换/轻微推近" : "顺切",
       beatHint: slot.rhythmHint === "fast" ? "卡点" : "平稳"
     };
+  });
+}
+
+function buildPreviewVariants(source: SourceInput, timeline: TimelineItem[]): PreviewVariant[] {
+  const targetDurationSec = clamp(timeline.at(-1)?.endSec ?? source.targetDurationSec ?? 18, 10, 60);
+  return previewTracks.map((track, index) => ({
+    id: `preview-${index + 1}-${track.track}`,
+    ...track,
+    targetDurationSec,
+    frameBudget: { ...FRAME_BUDGET },
+    promptHint: [
+      `使用 ${track.renderer} 生成「${track.title}」预览。`,
+      `总时长控制在 ${targetDurationSec} 秒内，抽帧预算 ${FRAME_BUDGET.minFrames}-${FRAME_BUDGET.maxFrames} 张，约每 ${FRAME_BUDGET.secondsPerFrame} 秒一帧。`,
+      `输入脚本来自结构迁移结果，禁止复用样例视频原画面、原字幕和原文案。`,
+      `重点表达：${track.description}`
+    ].join(" ")
+  }));
+}
+
+function buildRendererPrompt(source: SourceInput, script: string, timeline: TimelineItem[], variants: PreviewVariant[]) {
+  return JSON.stringify({
+    task: "Generate local Remotion or Hyperframes preview compositions from the transferred structure.",
+    constraints: {
+      maxDurationSec: 60,
+      frameBudget: FRAME_BUDGET,
+      preserveTimelineTiming: true,
+      doNotCopySampleContent: true,
+      output: "playable local preview first; MP4 export is optional"
+    },
+    brief: {
+      prompt: source.prompt,
+      productName: source.productName,
+      sellingPoints: source.sellingPoints,
+      targetAudience: source.targetAudience,
+      tone: source.tone,
+      strategy: source.strategy
+    },
+    script,
+    timeline,
+    previewVariants: variants.map((variant) => ({
+      track: variant.track,
+      title: variant.title,
+      renderer: variant.renderer,
+      promptHint: variant.promptHint
+    }))
   });
 }
 

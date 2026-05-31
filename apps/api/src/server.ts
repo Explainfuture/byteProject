@@ -27,6 +27,9 @@ const app = express();
 const port = Number(process.env.API_PORT ?? 8787);
 const uploadDir = resolve(process.env.UPLOAD_DIR ?? "data/uploads");
 const outputDir = resolve(process.env.OUTPUT_DIR ?? "data/outputs");
+const defaultMinVisionFrames = 4;
+const defaultMaxVisionFrames = 16;
+const defaultSecondsPerVisionFrame = 4;
 
 await mkdir(uploadDir, { recursive: true });
 await mkdir(outputDir, { recursive: true });
@@ -75,7 +78,7 @@ app.post("/api/upload/:role", upload.single("video"), async (request, response, 
       filePath: file.path,
       sizeBytes: file.size
     });
-    metadata.previewFrameDataUrls = parsePreviewFrames(request.body.previewFrames);
+    metadata.previewFrameDataUrls = parsePreviewFrames(request.body.previewFrames, metadata.durationSec);
     metadata.previewFrameCount = metadata.previewFrameDataUrls?.length;
     uploadedVideos.set(metadata.id, metadata);
     response.json({ video: publicVideo(metadata) });
@@ -129,7 +132,7 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
     return;
   }
   response.status(500).json({
-    error: error instanceof Error ? error.message : "Unknown server error"
+    error: "Internal server error. The workflow has hidden provider details and local paths."
   });
 });
 
@@ -151,14 +154,26 @@ function getVideoOrMock(id: string | undefined, role: "sample" | "material"): Vi
   };
 }
 
-function parsePreviewFrames(value: unknown): string[] | undefined {
+function parsePreviewFrames(value: unknown, durationSec?: number): string[] | undefined {
   if (typeof value !== "string" || !value.trim()) return undefined;
   try {
     const parsed = JSON.parse(value) as unknown;
     if (!Array.isArray(parsed)) return undefined;
-    const frames = parsed.filter((item): item is string => typeof item === "string" && /^data:image\/(jpeg|png);base64,/.test(item)).slice(0, 8);
+    const frameCount = resolveVisionFrameCount(durationSec);
+    const frames = parsed.filter((item): item is string => typeof item === "string" && /^data:image\/(jpeg|png);base64,/.test(item)).slice(0, frameCount);
     return frames.length ? frames : undefined;
   } catch {
     return undefined;
   }
+}
+
+function resolveVisionFrameCount(durationSec: number | undefined) {
+  const configuredMin = Number(process.env.VISION_MIN_FRAME_COUNT ?? defaultMinVisionFrames);
+  const configuredMax = Number(process.env.VISION_MAX_FRAME_COUNT ?? defaultMaxVisionFrames);
+  const configuredSecondsPerFrame = Number(process.env.VISION_SECONDS_PER_FRAME ?? defaultSecondsPerVisionFrame);
+  const minFrames = Number.isFinite(configuredMin) && configuredMin > 0 ? Math.round(configuredMin) : defaultMinVisionFrames;
+  const maxFrames = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.max(minFrames, Math.round(configuredMax)) : defaultMaxVisionFrames;
+  const secondsPerFrame = Number.isFinite(configuredSecondsPerFrame) && configuredSecondsPerFrame > 0 ? configuredSecondsPerFrame : defaultSecondsPerVisionFrame;
+  const safeDuration = Number.isFinite(durationSec) && Number(durationSec) > 0 ? Number(durationSec) : 18;
+  return Math.max(minFrames, Math.min(maxFrames, Math.ceil(safeDuration / secondsPerFrame)));
 }

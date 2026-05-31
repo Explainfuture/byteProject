@@ -16,7 +16,7 @@ export const sourceInputSchema = z
     sellingPoints: z.array(z.string()).optional(),
     targetAudience: z.string().trim().optional(),
     tone: z.string().trim().optional(),
-    targetDurationSec: z.coerce.number().min(6).max(180).optional(),
+    targetDurationSec: z.coerce.number().min(6).max(60).optional(),
     auxiliaryAssetIds: z.array(z.string()).optional(),
     strategy: creativeStrategySchema.optional()
   })
@@ -118,7 +118,7 @@ export async function runStructureTransferAgent(input: {
       {
         role: "system",
         content:
-          "You are the orchestrator for a short-video structure-transfer agent. Use tools to inspect the uploaded video, analyze key frames from the sample, retrieve knowledge, evaluate available visual segments, compose the plan, and render preview. Transfer creative method, not source content. Do not answer from memory. Call tools until a preview has been rendered. Final answer must be short JSON with status and calledTools."
+          "You are the orchestrator for a short-video structure-transfer agent. Use tools to inspect the uploaded video, analyze key frames from the sample, retrieve knowledge, evaluate available visual segments, compose the plan, ask the creative model to enhance the script/renderer prompt, and render preview. Transfer creative method, not source content. Do not answer from memory. Call tools until a preview has been rendered. Final answer must be short JSON with status and calledTools."
       },
       {
         role: "user",
@@ -135,6 +135,7 @@ export async function runStructureTransferAgent(input: {
             "retrieve_structure_knowledge",
             "evaluate_uploaded_video_segments",
             "compose_video_plan",
+            "enhance_creative_plan",
             "render_preview"
           ]
         })
@@ -488,6 +489,7 @@ function applyModelEnhancement(generated: GeneratedPlan, enhancement: Awaited<Re
   if (!enhancement) return;
 
   if (enhancement.script) generated.script = enhancement.script;
+  if (enhancement.rendererPrompt) generated.rendererPrompt = enhancement.rendererPrompt;
   if (enhancement.packagingSuggestions?.length) generated.packagingSuggestions = enhancement.packagingSuggestions;
   if (enhancement.rationale?.length) generated.compositionPlan.rationale = enhancement.rationale;
 

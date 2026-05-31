@@ -16,8 +16,8 @@ flowchart LR
   H --> K[Gap Planner]
   K --> J
   J --> L[脚本 / 分镜 / Composition Plan / Timeline]
-  L --> M[Remotion Preview Adapter]
-  M --> N[低保真成片 Demo]
+  L --> M[Remotion / HyperFrames Preview Adapter]
+  M --> N[10 个低保真风格赛道 Demo]
 ```
 
 ## Modules
@@ -44,8 +44,8 @@ flowchart LR
 当前工具：
 
 - FFmpeg Video Analyzer: 读取元数据，失败时降级为 mock metadata。
-- Remotion Storyboard Renderer: 当前生成低保真 HTML 预览，后续替换为 Remotion MP4。
-- Model Adapter: 预留真实模型调用，默认规则链路可运行。
+- Remotion Storyboard Renderer: 当前生成 10 个本地风格赛道的低保真 HTML/Remotion 预览，后续替换为 Remotion MP4。
+- Model Adapter: 通过 Ark/Doubao-compatible 接口分析 4-16 张中等抽帧、增强脚本和生成 Remotion/HyperFrames 渲染提示；默认规则链路可运行。
 - Knowledge Adapter: 本地知识库读写和检索。
 
 ## Safety Boundaries

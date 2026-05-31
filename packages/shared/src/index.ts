@@ -1,5 +1,17 @@
 export type CreativeStrategy = "balanced" | "high_click" | "high_conversion" | "high_rhythm" | "premium";
 
+export type VideoStyleTrack =
+  | "ecommerce_burst"
+  | "review_contrast"
+  | "b2b_marketing"
+  | "talking_head_knowledge"
+  | "vlog_lifestyle"
+  | "motion_graph_explainer"
+  | "event_promo"
+  | "tutorial_steps"
+  | "premium_brand"
+  | "cutting_beat";
+
 export type SegmentKind = "hook" | "body" | "proof" | "offer" | "cta";
 
 export type AssetType =
@@ -135,6 +147,21 @@ export type TimelineItem = {
   beatHint?: string;
 };
 
+export type PreviewVariant = {
+  id: string;
+  track: VideoStyleTrack;
+  title: string;
+  description: string;
+  renderer: "remotion" | "hyperframes";
+  targetDurationSec: number;
+  frameBudget: {
+    minFrames: number;
+    maxFrames: number;
+    secondsPerFrame: number;
+  };
+  promptHint: string;
+};
+
 export type StoryboardItem = {
   id: string;
   slotId: string;
@@ -151,6 +178,8 @@ export type GeneratedPlan = {
   timeline: TimelineItem[];
   compositionPlan: CompositionPlan;
   packagingSuggestions: string[];
+  rendererPrompt: string;
+  previewVariants: PreviewVariant[];
   demo: {
     status: "mock_ready" | "rendered" | "failed";
     url?: string;

@@ -25,6 +25,9 @@ await page.screenshot({ path: startMobileScreenshotPath, fullPage: true });
 await page.setViewportSize({ width: 1440, height: 900 });
 
 await page.locator("#targetPrompt").fill("把这个横屏科技展示视频迁移成新品发布短视频方案，强调空间感和产品亮相。");
+await page.locator(".brief-details").evaluate((node) => {
+  node.open = true;
+});
 await page.locator("#productName").fill("横屏演示装置");
 await page.locator("#targetAudience").fill("科技新品观众");
 await page.locator("#sellingPoints").fill("空间感强\n产品亮相明确\n适合发布会开场");
@@ -60,7 +63,7 @@ const agentMode = generateJson?.agentMode ?? "missing";
 const agentTraceCount = Array.isArray(generateJson?.agentTrace) ? generateJson.agentTrace.length : 0;
 await page.getByRole("heading", { name: "爆款结构迁移结果" }).waitFor({ state: "visible" });
 
-const demoTitleCount = await page.getByRole("heading", { name: /已生成 .* 秒商品短视频草案/ }).count();
+const demoTitleCount = await page.getByRole("heading", { name: /已生成 .* 秒结构化预览/ }).count();
 const fakeRemotionPlayerCount = await page.locator(".fake-remotion-player").count();
 const phoneRemotionPlayerCount = await page.locator(".phone-remotion-player").count();
 const naturalLanguageInputCount = await page.locator("#revisionPrompt").count();
@@ -69,9 +72,9 @@ const agentToolCallCount = await page.locator(".agent-tool-call").count();
 const userAgentBubbleCount = await page.locator(".chat-row.user .agent-bubble").count();
 const adaptiveVideoClasses = await page.locator(".adaptive-video-frame").evaluateAll((nodes) => nodes.map((node) => node.className));
 const landscapeVideoFrameCount = adaptiveVideoClasses.filter((className) => className.includes("landscape")).length;
-if (videoAgentPanelCount !== 1 || agentToolCallCount < 6 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
+if (videoAgentPanelCount !== 1 || agentToolCallCount !== 1 || fakeRemotionPlayerCount !== 10 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
   throw new Error(
-    `Agent conversation panel is incomplete. panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
+    `Agent conversation panel or preview grid is incomplete. panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, previews=${fakeRemotionPlayerCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
   );
 }
 
