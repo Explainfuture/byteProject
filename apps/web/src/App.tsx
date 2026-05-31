@@ -1224,6 +1224,15 @@ function VideoAgentPanel(props: {
   onSubmit: () => void;
   disabled: boolean;
 }) {
+  const hasRunningTurn = props.turns.some((turn) => turn.status === "running");
+  const [agentClock, setAgentClock] = useState(Date.now());
+
+  useEffect(() => {
+    if (!hasRunningTurn) return undefined;
+    const timer = window.setInterval(() => setAgentClock(Date.now()), 900);
+    return () => window.clearInterval(timer);
+  }, [hasRunningTurn]);
+
   const fallbackTurn: AgentTurn = {
     id: props.result.generated.id,
     prompt: firstBriefLine(props.result.source.prompt),
@@ -1249,8 +1258,10 @@ function VideoAgentPanel(props: {
         {turns.map((turn, index) => {
           const isLatestTurn = index === turns.length - 1;
           const turnResult = turn.result ?? (index === turns.length - 1 && turn.status === "done" ? props.result : undefined);
-          const steps = turnResult ? buildResultAgentSteps(turnResult, props.sampleVideo) : buildLiveAgentSteps(progressSteps.length - 1, props.sampleVideo);
+          const liveIndex = currentLiveAgentStepIndex(turn.startedAt, agentClock);
+          const steps = turnResult ? buildDynamicResultAgentSteps(turnResult, props.sampleVideo) : buildDynamicLiveAgentSteps(liveIndex, props.sampleVideo);
           const activeStep = currentAgentToolStep(steps);
+          const visibleSteps = visibleAgentToolSteps(steps, Boolean(turnResult));
           return (
             <div className="agent-turn" key={turn.id}>
               <div className="chat-row user">
@@ -1265,12 +1276,14 @@ function VideoAgentPanel(props: {
                 </div>
                 <div className="agent-bubble ai-bubble">
                   <span>VIDEO AGENT</span>
-                  <p>我会把上传视频拆成可迁移的方法链路，不复制原片内容。下面是本轮工具调用过程。</p>
+                  <p className="agent-dynamic-intro">{agentTurnIntro(turn, activeStep, Boolean(turnResult))}</p>
                 </div>
               </div>
               {isLatestTurn ? (
                 <div className="agent-tool-stack">
-                  <AgentToolCall step={activeStep} />
+                  {visibleSteps.map((step) => (
+                    <AgentToolCall key={step.id} step={step} />
+                  ))}
                 </div>
               ) : null}
               {turnResult ? (
@@ -1356,6 +1369,28 @@ function currentAgentToolStep(steps: AgentToolStep[]): AgentToolStep {
       status: "pending"
     }
   );
+}
+
+function currentLiveAgentStepIndex(startedAt: number, now: number) {
+  const elapsed = Math.max(0, now - startedAt);
+  const thresholds = [0, 1200, 3200, 5600, 8200, 11000];
+  let index = 0;
+  for (const [candidate, threshold] of thresholds.entries()) {
+    if (elapsed >= threshold) index = candidate;
+  }
+  return Math.min(index, progressSteps.length - 1);
+}
+
+function visibleAgentToolSteps(steps: AgentToolStep[], isDone: boolean) {
+  const visible = steps.filter((step) => step.status !== "pending");
+  if (isDone) return visible.length ? visible : steps.slice(0, 1);
+  return visible.slice(-3);
+}
+
+function agentTurnIntro(turn: AgentTurn, activeStep: AgentToolStep, hasResult: boolean) {
+  if (hasResult) return "本轮模型调用已返回，下面是服务端收到的真实工具链结果。";
+  if (turn.status === "running") return `正在执行：${activeStep.title}。我会等模型返回结构化制作规范后再更新结果。`;
+  return "等待下一轮指令。";
 }
 
 function StructureMapping(props: { result: RunResult; matches: SlotMatch[] }) {
@@ -1637,6 +1672,107 @@ function buildLiveAgentSteps(currentIndex: number, sampleVideo: UploadedVideo | 
   }));
 }
 
+function buildDynamicLiveAgentSteps(currentIndex: number, sampleVideo: UploadedVideo | null): AgentToolStep[] {
+  const liveDetails = [
+    {
+      id: "ingest",
+      title: "接收视频与指令",
+      detail: sampleVideo ? `已接收 ${sampleVideo.name}，准备抽取关键帧。` : "等待上传视频进入模型链路。",
+      meta: "input"
+    },
+    {
+      id: "frames",
+      title: "抽取关键帧",
+      detail: "服务端正在从视频时间轴采样关键帧，用于让模型解析画面结构、节奏和包装方式。",
+      meta: "frames"
+    },
+    {
+      id: "vision",
+      title: "请求 Doubao 视觉理解",
+      detail: "把关键帧、视频元数据和本轮指令发给模型，要求模型解析爆款制作方法。",
+      meta: "model"
+    },
+    {
+      id: "plan",
+      title: "生成模型制作规范",
+      detail: "等待模型输出 slotMatches、timeline、assetIds、分镜、字幕、包装和预期效果。",
+      meta: "plan"
+    },
+    {
+      id: "render",
+      title: "服务端执行渲染",
+      detail: "服务端只按模型返回的制作规范截取、重排、拼接并写出 MP4。",
+      meta: "render"
+    },
+    {
+      id: "result",
+      title: "同步生成结果",
+      detail: "等待后端返回真实工具 trace 和最终成片状态。",
+      meta: "result"
+    }
+  ];
+
+  return liveDetails.map((step, index) => ({
+    ...step,
+    status: index < currentIndex ? "done" : index === currentIndex ? "running" : "pending"
+  }));
+}
+
+function buildDynamicResultAgentSteps(result: AgentRunResult, sampleVideo: UploadedVideo | null): AgentToolStep[] {
+  const sample = result.samples[0];
+  const duration = result.generated.timeline.at(-1)?.endSec ?? result.source.targetDurationSec;
+  const frameCount = sample?.video.previewFrameCount ?? sample?.video.previewFrameDataUrls?.length ?? traceFrameCount(result.agentTrace) ?? 0;
+  const visibleVideoName = sampleVideo?.name ?? sample?.video.fileName ?? "上传视频";
+  const visionTrace = result.agentTrace?.find((item) => item.tool === "vision_model" || item.tool === "analyze_sample_video");
+  const planTrace = result.agentTrace?.find((item) => item.tool === "model_plan_composer" || item.tool === "compose_video_plan");
+  const rendered = result.generated.demo.status === "rendered";
+  const failed = result.generated.demo.status === "failed";
+
+  return [
+    {
+      id: "ingest",
+      title: "接收视频与指令",
+      detail: `${visibleVideoName} · ${Math.round(sample?.video.durationSec ?? duration)}s · ${sample?.video.width ?? "-"}x${sample?.video.height ?? "-"}`,
+      meta: "input",
+      status: "done"
+    },
+    {
+      id: "frames",
+      title: "抽取关键帧",
+      detail: frameCount > 0 ? `已抽取 ${frameCount} 张关键帧进入模型分析。` : "已接收视频元数据；没有拿到可展示的关键帧计数。",
+      meta: "frames",
+      status: "done"
+    },
+    {
+      id: "vision",
+      title: "模型解析爆款结构",
+      detail: visionTrace?.ok ? "模型已返回视频结构理解结果，并合并到样例拆解中。" : traceFailureText(visionTrace, "模型视觉理解没有返回可用结构。"),
+      meta: "model",
+      status: visionTrace?.ok ? "done" : "fallback"
+    },
+    {
+      id: "plan",
+      title: "模型生成制作规范",
+      detail: planTrace?.ok
+        ? `模型已输出 ${result.generated.timeline.length} 个时间线片段和 ${result.generated.compositionPlan.slotMatches.length} 个槽位匹配。`
+        : traceFailureText(planTrace, "模型没有返回可执行的制作规范。"),
+      meta: "plan",
+      status: planTrace?.ok ? "done" : "fallback"
+    },
+    {
+      id: "render",
+      title: rendered ? "服务端已写出 MP4" : "服务端未生成 MP4",
+      detail: rendered
+        ? result.generated.demo.note
+        : failed
+          ? "模型制作规范失败，本轮不会使用本地规则假生成视频。"
+          : "等待可渲染的模型制作规范。",
+      meta: rendered ? "mp4" : "blocked",
+      status: rendered ? "done" : "fallback"
+    }
+  ];
+}
+
 function buildResultAgentSteps(result: AgentRunResult, sampleVideo: UploadedVideo | null): AgentToolStep[] {
   const sample = result.samples[0];
   const frameCount = sample?.video.previewFrameCount ?? sample?.video.previewFrameDataUrls?.length ?? traceFrameCount(result.agentTrace) ?? 0;
@@ -1714,7 +1850,22 @@ function traceFrameCount(trace: AgentTraceItem[] | undefined) {
   return undefined;
 }
 
+function traceFailureText(trace: AgentTraceItem | undefined, fallback: string) {
+  if (!trace) return fallback;
+  const observation = trace.observation;
+  if (observation && typeof observation === "object") {
+    const directError = (observation as { error?: unknown }).error;
+    if (typeof directError === "string" && directError.trim()) return directError;
+    const status = (observation as { status?: unknown }).status;
+    if (typeof status === "string" && status.trim()) return `${fallback} 状态：${status}`;
+  }
+  return fallback;
+}
+
 function agentResultSummary(result: AgentRunResult) {
+  if (result.generated.demo.status === "failed") {
+    return result.generated.demo.note || result.generated.compositionPlan.rationale[0] || "模型制作规范失败，本轮没有生成本地兜底视频。";
+  }
   const duration = result.generated.timeline.at(-1)?.endSec ?? result.source.targetDurationSec;
   const rationale = publicRationale(result.generated.compositionPlan.rationale[0]);
   return `${rationale ?? "已完成结构迁移。"} 当前方案为 ${duration} 秒，可继续告诉我改开头、卖点顺序、字幕密度或节奏。`;
