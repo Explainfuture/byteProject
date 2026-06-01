@@ -16,6 +16,8 @@ describe("mock P0 pipeline", () => {
     expect(result.generated.previewVariants.length).toBeGreaterThanOrEqual(1);
     expect(result.generated.previewVariants.every((variant) => variant.targetDurationSec <= 60)).toBe(true);
     expect(result.generated.demo.status).toBe("mock_ready");
+    expect(result.benchmarkScore.totalScore).toBeGreaterThanOrEqual(80);
+    expect(result.benchmarkScore.dimensionScores).toHaveLength(7);
   });
 
   it("builds uploaded-video fallback analysis from the user brief instead of default mock copy", () => {

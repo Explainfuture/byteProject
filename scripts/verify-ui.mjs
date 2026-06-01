@@ -9,14 +9,26 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 page.setDefaultTimeout(120_000);
 page.setDefaultNavigationTimeout(120_000);
 
+await page.addInitScript(() => window.localStorage.removeItem("byteproject:migration-history"));
 await page.goto("http://localhost:5173", { waitUntil: "networkidle" });
 
-const generateButtonName = "开始 AI 拆解并生成方案";
-const startTitle = await page.getByRole("heading", { name: "爆款结构迁移引擎" }).innerText();
+const generateButtonName = "发送给主智能体";
+const startTitle = await page.locator(".input-panel .section-heading strong").first().innerText();
 const uploadActionCount = await page.locator(".upload-action").count();
 const promptCount = await page.locator("#targetPrompt").count();
+const workbenchShellCount = await page.locator(".workbench-shell").count();
+const sideNavCount = await page.locator(".workbench-sidenav").count();
+const topNavCount = await page.locator(".workbench-topnav").count();
 const studioWorkspaceCount = await page.locator(".studio-workspace").count();
+const startAgentPanelCount = await page.locator(".start-agent-panel").count();
+const agentReadyCount = await page.locator(".agent-ready-state").count();
+const startRunningToolCount = await page.locator(".start-agent-flow .agent-tool-call.running").count();
 const startButtonInitiallyDisabled = await page.getByRole("button", { name: generateButtonName }).isDisabled();
+if (workbenchShellCount !== 1 || sideNavCount !== 1 || topNavCount !== 1 || agentReadyCount !== 1 || startRunningToolCount !== 0) {
+  throw new Error(
+    `Stitch 工作台结构不完整。shell=${workbenchShellCount}, side=${sideNavCount}, top=${topNavCount}, ready=${agentReadyCount}, running=${startRunningToolCount}`
+  );
+}
 const startDesktopScreenshotPath = resolve("data/tmp/ui-start-1440.png");
 const startMobileScreenshotPath = resolve("data/tmp/ui-start-mobile.png");
 await page.screenshot({ path: startDesktopScreenshotPath, fullPage: true });
@@ -37,14 +49,19 @@ await Promise.all([
   page.waitForResponse((response) => response.url().includes("/api/upload/sample") && response.status() === 200),
   page.locator("#sample-video").setInputFiles(landscapeVideoFile)
 ]);
+await page.waitForFunction((buttonName) => {
+  const buttons = Array.from(document.querySelectorAll("button"));
+  return buttons.some((button) => button.textContent?.includes(buttonName) && !button.disabled);
+}, generateButtonName);
 
-const responsePromise = page.waitForResponse((response) => response.url().includes("/api/generate") && response.status() === 200, {
-  timeout: 120_000
+const responsePromise = page.waitForResponse((response) => response.url().includes("/api/generate"), {
+  timeout: 300_000
 });
 await page.getByRole("button", { name: generateButtonName }).click();
-await page.getByRole("heading", { name: "正在分析样例视频" }).waitFor({ state: "visible" });
-const progressStepCount = await page.locator(".progress-step").count();
 const generateResponse = await responsePromise;
+if (generateResponse.status() !== 200) {
+  throw new Error(`Generate request failed with HTTP ${generateResponse.status()}`);
+}
 const generateJson = await generateResponse.json();
 const generatedJsonText = JSON.stringify(generateJson);
 const usesCustomBrief = generatedJsonText.includes("横屏演示装置") && generatedJsonText.includes("空间感强");
@@ -61,7 +78,11 @@ const modelEnhanced = generationRationale.some(
 );
 const agentMode = generateJson?.agentMode ?? "missing";
 const agentTraceCount = Array.isArray(generateJson?.agentTrace) ? generateJson.agentTrace.length : 0;
-await page.getByRole("heading", { name: "爆款结构迁移结果" }).waitFor({ state: "visible" });
+const benchmarkScore = generateJson?.benchmarkScore?.totalScore;
+if (typeof benchmarkScore !== "number" || !Array.isArray(generateJson?.benchmarkScore?.dimensionScores) || generateJson.benchmarkScore.dimensionScores.length !== 7) {
+  throw new Error("Generated result is missing a complete benchmarkScore.");
+}
+await page.locator(".result-shell").waitFor({ state: "visible" });
 
 const demoTitleCount = await page.getByRole("heading", { name: /已生成 .* 秒结构化预览/ }).count();
 const fakeRemotionPlayerCount = await page.locator(".fake-remotion-player").count();
@@ -72,11 +93,14 @@ const agentToolCallCount = await page.locator(".agent-tool-call").count();
 const userAgentBubbleCount = await page.locator(".chat-row.user .agent-bubble").count();
 const adaptiveVideoClasses = await page.locator(".adaptive-video-frame").evaluateAll((nodes) => nodes.map((node) => node.className));
 const landscapeVideoFrameCount = adaptiveVideoClasses.filter((className) => className.includes("landscape")).length;
-if (videoAgentPanelCount !== 1 || agentToolCallCount !== 1 || fakeRemotionPlayerCount !== 10 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
+if (videoAgentPanelCount !== 1 || agentToolCallCount < 4 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
   throw new Error(
-    `Agent conversation panel or preview grid is incomplete. panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, previews=${fakeRemotionPlayerCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
+    `智能体对话面板或预览区不完整。panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, previews=${fakeRemotionPlayerCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
   );
 }
+
+await page.locator(".result-nav button", { hasText: "评分" }).click();
+const benchmarkDimensionCount = await page.locator(".benchmark-dimensions article").count();
 
 await page.locator(".result-nav button", { hasText: "结构" }).click();
 const mappingRowCount = await page.locator(".mapping-row").count();
@@ -90,13 +114,42 @@ const timelineTrackCount = await page.locator(".light-track").count();
 await page.locator(".result-nav button", { hasText: "成片" }).click();
 const screenshotPath = resolve("data/tmp/ui-verification.png");
 await page.screenshot({ path: screenshotPath, fullPage: true });
+
+await page.getByRole("button", { name: "历史", exact: true }).click();
+await page.locator(".history-shell").waitFor({ state: "visible" });
+const historyCardCount = await page.locator(".history-card").count();
+const activeSideLabelsOnHistory = await page.locator(".sidenav-links button.active span").allInnerTexts();
+const persistedHistoryCount = await page.evaluate(() => {
+  const raw = window.localStorage.getItem("byteproject:migration-history");
+  return raw ? JSON.parse(raw).length : 0;
+});
+if (historyCardCount < 1 || persistedHistoryCount < 1) {
+  throw new Error(`历史功能没有记录本轮结果。cards=${historyCardCount}, persisted=${persistedHistoryCount}`);
+}
+if (!activeSideLabelsOnHistory.includes("历史记录")) {
+  throw new Error(`历史页侧边栏当前项不正确：${activeSideLabelsOnHistory.join(",")}`);
+}
+const historyScreenshotPath = resolve("data/tmp/ui-history.png");
+await page.screenshot({ path: historyScreenshotPath, fullPage: true });
+await page.getByRole("button", { name: "打开结果" }).first().click();
+await page.locator(".result-shell").waitFor({ state: "visible" });
+const restoredResultPanelCount = await page.locator(".video-agent-panel").count();
+if (restoredResultPanelCount !== 1) {
+  throw new Error(`从历史打开结果失败。agentPanels=${restoredResultPanelCount}`);
+}
 await browser.close();
 
 const result = {
   startTitle,
   uploadActionCount,
   promptCount,
+  workbenchShellCount,
+  sideNavCount,
+  topNavCount,
   studioWorkspaceCount,
+  startAgentPanelCount,
+  agentReadyCount,
+  startRunningToolCount,
   startButtonInitiallyDisabled,
   startDesktopScreenshotPath,
   startMobileScreenshotPath,
@@ -108,7 +161,8 @@ const result = {
   modelEnhanced,
   agentMode,
   agentTraceCount,
-  progressStepCount,
+  benchmarkScore,
+  benchmarkDimensionCount,
   demoTitleCount,
   fakeRemotionPlayerCount,
   phoneRemotionPlayerCount,
@@ -119,7 +173,12 @@ const result = {
   mappingRowCount,
   diagnosisCardCount,
   timelineTrackCount,
-  screenshotPath
+  screenshotPath,
+  historyCardCount,
+  persistedHistoryCount,
+  activeSideLabelsOnHistory,
+  historyScreenshotPath,
+  restoredResultPanelCount
 };
 
 await writeFile(resolve("data/tmp/ui-verification.json"), JSON.stringify(result, null, 2), "utf8");

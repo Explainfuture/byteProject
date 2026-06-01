@@ -317,6 +317,76 @@ export type GeneratedPlan = {
   };
 };
 
+export type BenchmarkDimensionId =
+  | "hook_attraction"
+  | "brief_copy_adaptation"
+  | "reference_structure_transfer"
+  | "retention_rhythm"
+  | "visual_packaging_watchability"
+  | "asset_gap_handling"
+  | "safety_explainability";
+
+export type BenchmarkDimensionScore = {
+  id: BenchmarkDimensionId;
+  label: string;
+  score: number;
+  maxScore: number;
+  evidence: string[];
+  deductions: string[];
+  fixInstruction: string;
+};
+
+export type BenchmarkRevisionBrief = {
+  task: "revise_video_plan_from_benchmark";
+  targetScore: number;
+  currentScore: number;
+  failedDimensions: Array<{
+    dimension: BenchmarkDimensionId;
+    score: number;
+    reason: string;
+    instruction: string;
+  }>;
+  mustKeep: string[];
+  mustAvoid: string[];
+  rewriteScope: Array<"script" | "timeline captions" | "packaging" | "transition" | "beatHint" | "rendererPrompt">;
+};
+
+export type BenchmarkScore = {
+  candidateId: string;
+  iterationIndex: number;
+  totalScore: number;
+  grade: "excellent" | "pass" | "needs_iteration" | "fail";
+  accepted: boolean;
+  threshold: {
+    regenerateBelow: 60;
+    targetScore: 80;
+    excellentFrom: 85;
+    maxIterations: 3;
+  };
+  dimensionScores: BenchmarkDimensionScore[];
+  hardFailures: Array<{
+    code:
+      | "missing_real_slots"
+      | "empty_preview"
+      | "copied_sample_content"
+      | "brief_mismatch"
+      | "sensitive_leak";
+    maxAllowedScore: number;
+    reason: string;
+  }>;
+  topFixes: string[];
+  revisionBrief?: BenchmarkRevisionBrief;
+};
+
+export type CandidateIteration = {
+  candidateId: string;
+  parentCandidateId?: string;
+  iterationIndex: number;
+  compositionPlan: CompositionPlan;
+  timeline: TimelineItem[];
+  benchmarkScore: BenchmarkScore;
+};
+
 export type RunResult = {
   mode: "mock" | "real";
   source: SourceInput;
@@ -327,4 +397,6 @@ export type RunResult = {
     segments: MaterialSegment[];
   };
   generated: GeneratedPlan;
+  benchmarkScore: BenchmarkScore;
+  iterations: CandidateIteration[];
 };

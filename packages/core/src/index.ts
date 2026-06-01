@@ -2,6 +2,9 @@ import { knowledgeStore, seedKnowledge } from "@byteproject/knowledge";
 import { creativeReconstructionSkills, inferCreativeSkillIds } from "@byteproject/shared";
 import type {
   AssetType,
+  BenchmarkDimensionId,
+  BenchmarkDimensionScore,
+  BenchmarkScore,
   CompositionPlan,
   GeneratedPlan,
   GapStrategy,
@@ -10,6 +13,7 @@ import type {
   PreviewVariant,
   RunResult,
   SampleAnalysis,
+  SegmentKind,
   SlotMatch,
   SourceInput,
   StoryboardItem,
@@ -375,6 +379,266 @@ export function composePlan(input: {
   };
 }
 
+const BENCHMARK_THRESHOLD = {
+  regenerateBelow: 60,
+  targetScore: 80,
+  excellentFrom: 85,
+  maxIterations: 3
+} as const;
+
+const dimensionLabels: Record<BenchmarkDimensionId, string> = {
+  hook_attraction: "开头吸引力与停留动机",
+  brief_copy_adaptation: "用户需求与文案适配",
+  reference_structure_transfer: "样例结构迁移质量",
+  retention_rhythm: "叙事推进与留存节奏",
+  visual_packaging_watchability: "画面包装与可观看性",
+  asset_gap_handling: "素材利用与缺口处理",
+  safety_explainability: "合规、安全与可解释性"
+};
+
+export function scoreCandidate(input: {
+  candidateId?: string;
+  iterationIndex?: number;
+  source: SourceInput;
+  sample?: SampleAnalysis;
+  knowledge: KnowledgeEntry[];
+  materialSegments: MaterialSegment[];
+  generated: GeneratedPlan;
+  usedVision?: boolean;
+}): BenchmarkScore {
+  const generatedText = collectGeneratedText(input.generated);
+  const timeline = input.generated.timeline;
+  const matches = input.generated.compositionPlan.slotMatches;
+  const sampleSlots = input.sample?.slots ?? [];
+  const hardFailures: BenchmarkScore["hardFailures"] = [];
+  const firstItem = timeline[0];
+  const timelineDuration = timeline.at(-1)?.endSec ?? 0;
+  const expectedOrder: SegmentKind[] = ["hook", "body", "proof", "offer", "cta"];
+  const sampleSlotById = new Map(sampleSlots.map((slot) => [slot.id, slot]));
+  const timelineSegments = timeline.map((item) => sampleSlotById.get(item.slotId)?.segment).filter(Boolean) as SegmentKind[];
+  const briefFacts = [input.source.productName, ...input.source.sellingPoints].map(cleanBriefText).filter((item) => item.length >= 2);
+  const briefHitCount = briefFacts.filter((fact) => generatedText.includes(fact)).length;
+  const copiedLines = (input.sample?.transcript ?? [])
+    .map((line) => cleanBriefText(line.text))
+    .filter((line) => line.length >= 8 && generatedText.includes(line));
+  const hasSensitiveLeak = /([A-Z]:\\|\/Users\/|\/home\/|localPath|ARK_API_KEY|Bearer\s+|endpoint id|stack trace)/i.test(generatedText);
+
+  if (!sampleSlots.length || input.usedVision === false) {
+    hardFailures.push({
+      code: "missing_real_slots",
+      maxAllowedScore: 59,
+      reason: "没有真实视频结构 slots，不能把 mock 或规则 fallback 包装成真实视频理解结果。"
+    });
+  }
+  if (input.generated.demo.status === "failed" || !timeline.length) {
+    hardFailures.push({
+      code: "empty_preview",
+      maxAllowedScore: 59,
+      reason: "没有可播放预览或时间线为空，不能进入交付。"
+    });
+  }
+  if (copiedLines.length) {
+    hardFailures.push({
+      code: "copied_sample_content",
+      maxAllowedScore: 49,
+      reason: "生成结果复用了样例原字幕或原文案。"
+    });
+  }
+  if (briefFacts.length && briefHitCount === 0) {
+    hardFailures.push({
+      code: "brief_mismatch",
+      maxAllowedScore: 59,
+      reason: "生成结果没有吸收用户提供的商品名或卖点。"
+    });
+  }
+  if (hasSensitiveLeak) {
+    hardFailures.push({
+      code: "sensitive_leak",
+      maxAllowedScore: 40,
+      reason: "生成结果包含本地路径、密钥、endpoint 或 provider 细节。"
+    });
+  }
+
+  const hookScore = clampScore(
+    8 +
+      (timelineSegments[0] === "hook" ? 4 : 0) +
+      (firstItem?.caption && firstItem.caption.length <= 28 ? 3 : 0) +
+      (firstItem?.packaging?.length ? 3 : 0) +
+      (firstItem?.beatHint || firstItem?.transition ? 2 : 0),
+    20
+  );
+
+  const briefScore = clampScore(
+    5 +
+      (briefFacts.length ? Math.min(7, Math.round((briefHitCount / briefFacts.length) * 7)) : 4) +
+      (input.source.targetAudience && generatedText.includes(input.source.targetAudience) ? 2 : 0) +
+      (input.source.tone && generatedText.includes(input.source.tone.slice(0, 4)) ? 1 : 0),
+    15
+  );
+
+  const transferScore = clampScore(
+    4 +
+      (sampleSlots.length >= 5 ? 4 : sampleSlots.length) +
+      (input.generated.compositionPlan.selectedAtomIds.length ? 3 : 0) +
+      (matches.length >= Math.min(sampleSlots.length, 5) ? 3 : 0) +
+      (input.knowledge.length ? 1 : 0),
+    15
+  );
+
+  const orderedSegments = expectedOrder.filter((segment) => timelineSegments.includes(segment));
+  const hasOrderedFlow = orderedSegments.every((segment, index) => expectedOrder.indexOf(segment) >= index);
+  const durationVariation = new Set(timeline.map((item) => Number((item.endSec - item.startSec).toFixed(1)))).size;
+  const rhythmScore = clampScore(
+    4 +
+      (timeline.length >= 5 ? 4 : timeline.length) +
+      (hasOrderedFlow ? 3 : 0) +
+      (timelineDuration >= 10 && timelineDuration <= 60 ? 2 : 0) +
+      (durationVariation >= 3 ? 2 : 0),
+    15
+  );
+
+  const packagedItems = timeline.filter((item) => item.packaging.length || item.transition || item.beatHint).length;
+  const watchabilityScore = clampScore(
+    4 +
+      (input.generated.demo.status === "rendered" || input.generated.demo.status === "mock_ready" ? 3 : 0) +
+      Math.min(4, packagedItems) +
+      (input.generated.packagingSuggestions.length >= 3 ? 2 : input.generated.packagingSuggestions.length) +
+      (timeline.every((item) => item.caption.trim().length > 0) ? 2 : 0),
+    15
+  );
+
+  const diagnosedMatches = matches.filter((match) => match.status === "matched" || match.gapPlan).length;
+  const weakOrMissingWithPlan = matches.filter((match) => match.status !== "matched").every((match) => Boolean(match.gapPlan));
+  const gapScore = clampScore(
+    2 +
+      (matches.length ? Math.round((diagnosedMatches / matches.length) * 4) : 0) +
+      (weakOrMissingWithPlan ? 2 : 0) +
+      (input.materialSegments.length ? 2 : 0),
+    10
+  );
+
+  const safetyScore = clampScore(
+    4 +
+      (hasSensitiveLeak ? 0 : 3) +
+      (copiedLines.length ? 0 : 2) +
+      (input.generated.compositionPlan.rationale.length ? 1 : 0),
+    10
+  );
+
+  const dimensionScores: BenchmarkDimensionScore[] = [
+    makeDimension("hook_attraction", 20, hookScore, [
+      firstItem ? `首段 ${firstItem.startSec}-${firstItem.endSec}s，caption: ${firstItem.caption}` : "缺少首段时间线。"
+    ], hookScore >= 16 ? [] : ["首段 hook、短字幕或节奏提示不够强。"], "强化前 3 秒冲突、利益点或反差，并给首段增加明确包装。"),
+    makeDimension("brief_copy_adaptation", 15, briefScore, [
+      briefFacts.length ? `命中 ${briefHitCount}/${briefFacts.length} 个用户事实。` : "用户未提供商品事实，按 prompt 相关性评分。"
+    ], briefScore >= 12 ? [] : ["用户商品名、卖点或人群吸收不足。"], "把用户事实改写成口语化短视频文案，避免只复述表单。"),
+    makeDimension("reference_structure_transfer", 15, transferScore, [
+      `样例 slots: ${sampleSlots.length}，引用 atoms: ${input.generated.compositionPlan.selectedAtomIds.length}，知识条目: ${input.knowledge.length}。`
+    ], transferScore >= 12 ? [] : ["结构槽位、知识 atom 或 slot match 覆盖不足。"], "保留 hook/body/proof/offer/cta 结构，并明确每段迁移了哪个原子技巧。"),
+    makeDimension("retention_rhythm", 15, rhythmScore, [
+      `时间线 ${timeline.length} 段，总时长 ${timelineDuration}s，节奏段长变化 ${durationVariation} 种。`
+    ], rhythmScore >= 12 ? [] : ["推进顺序或段落节奏不够清晰。"], "压缩拖沓段落，增加信息递进、高潮点和 CTA 收口。"),
+    makeDimension("visual_packaging_watchability", 15, watchabilityScore, [
+      `demo 状态: ${input.generated.demo.status}，有包装/转场/节拍的段落: ${packagedItems}/${timeline.length}。`
+    ], watchabilityScore >= 12 ? [] : ["包装密度、可播放状态或非空 caption 需要增强。"], "增加标题条、卖点卡、进度条或卡点转场，并确保预览非空白可播放。"),
+    makeDimension("asset_gap_handling", 10, gapScore, [
+      `素材候选 ${input.materialSegments.length} 段，诊断 slot match ${diagnosedMatches}/${matches.length}。`
+    ], gapScore >= 8 ? [] : ["弱匹配或缺失槽位缺少可执行 gapPlan。"], "给每个 weak/missing slot 补上 reuse/copy/packaging/reorder 等方案。"),
+    makeDimension("safety_explainability", 10, safetyScore, [
+      input.generated.compositionPlan.rationale[0] ?? "缺少可解释 rationale。"
+    ], safetyScore >= 8 ? [] : ["需要更清楚地区分结构迁移、素材复用和降级状态。"], "移除敏感信息，补充抽帧、slot、知识 atom 和主要扣分证据。")
+  ];
+
+  const rawScore = dimensionScores.reduce((sum, dimension) => sum + dimension.score, 0);
+  const maxAllowedScore = hardFailures.reduce((cap, failure) => Math.min(cap, failure.maxAllowedScore), 100);
+  const totalScore = Math.min(rawScore, maxAllowedScore);
+  const accepted = totalScore >= BENCHMARK_THRESHOLD.targetScore && hardFailures.length === 0;
+  const grade: BenchmarkScore["grade"] =
+    totalScore >= BENCHMARK_THRESHOLD.excellentFrom && hardFailures.length === 0
+      ? "excellent"
+      : accepted
+        ? "pass"
+        : totalScore >= BENCHMARK_THRESHOLD.regenerateBelow
+          ? "needs_iteration"
+          : "fail";
+  const topFixes = dimensionScores
+    .slice()
+    .sort((a, b) => b.maxScore - b.score - (a.maxScore - a.score))
+    .filter((dimension) => dimension.score < dimension.maxScore)
+    .slice(0, 3)
+    .map((dimension) => dimension.fixInstruction);
+
+  const score: BenchmarkScore = {
+    candidateId: input.candidateId ?? input.generated.id,
+    iterationIndex: input.iterationIndex ?? 0,
+    totalScore,
+    grade,
+    accepted,
+    threshold: { ...BENCHMARK_THRESHOLD },
+    dimensionScores,
+    hardFailures,
+    topFixes
+  };
+
+  if (!accepted) {
+    score.revisionBrief = {
+      task: "revise_video_plan_from_benchmark",
+      targetScore: BENCHMARK_THRESHOLD.targetScore,
+      currentScore: totalScore,
+      failedDimensions: dimensionScores
+        .slice()
+        .sort((a, b) => b.maxScore - b.score - (a.maxScore - a.score))
+        .slice(0, 3)
+        .map((dimension) => ({
+          dimension: dimension.id,
+          score: dimension.score,
+          reason: dimension.deductions[0] ?? `该维度未满分：${dimension.score}/${dimension.maxScore}`,
+          instruction: dimension.fixInstruction
+        })),
+      mustKeep: [
+        "继续使用同一轮上传视频、sample slots、material segment ids 和用户事实。",
+        "只迁移创作结构，不复制样例原画面、原字幕、原文案、人物或声音。"
+      ],
+      mustAvoid: [
+        "不要虚构未提供的商品能力、测评数据、优惠或库存。",
+        "不要泄露本地路径、API key、provider 原始错误或 endpoint。"
+      ],
+      rewriteScope: ["script", "timeline captions", "packaging", "transition", "beatHint", "rendererPrompt"]
+    };
+  }
+
+  return score;
+}
+
+export function createEmptyBenchmarkScore(candidateId: string, reason: string): BenchmarkScore {
+  const dimensionScores: BenchmarkDimensionScore[] = [
+    makeDimension("hook_attraction", 20, 0, [], [reason], "上传视频并生成候选后再评估 hook。"),
+    makeDimension("brief_copy_adaptation", 15, 0, [], [reason], "补充迁移目标和商品事实。"),
+    makeDimension("reference_structure_transfer", 15, 0, [], [reason], "先补齐真实样例结构 slots。"),
+    makeDimension("retention_rhythm", 15, 0, [], [reason], "生成时间线后再评估节奏。"),
+    makeDimension("visual_packaging_watchability", 15, 0, [], [reason], "生成可播放预览后再评估包装。"),
+    makeDimension("asset_gap_handling", 10, 0, [], [reason], "先完成素材槽位匹配。"),
+    makeDimension("safety_explainability", 10, 0, [], [reason], "生成结果后再评估安全解释。")
+  ];
+  return {
+    candidateId,
+    iterationIndex: 0,
+    totalScore: 0,
+    grade: "fail",
+    accepted: false,
+    threshold: { ...BENCHMARK_THRESHOLD },
+    dimensionScores,
+    hardFailures: [
+      {
+        code: "empty_preview",
+        maxAllowedScore: 59,
+        reason
+      }
+    ],
+    topFixes: ["上传视频并让 Agent 完成生成后再打分。"]
+  };
+}
+
 function selectAtoms(atoms: TechniqueAtom[], strategy: SourceInput["strategy"]) {
   const priorityKinds = strategy === "high_conversion" ? ["cta", "slot", "gap_fill"] : strategy === "high_rhythm" ? ["rhythm", "transition"] : ["hook", "slot", "packaging", "cta"];
   return atoms
@@ -527,6 +791,14 @@ export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
   const knowledge = knowledgeStore.retrieve({ vertical: "marketing", prompt: fullSource.prompt, limit: 2 });
   const segments = segmentLongVideo(materialVideo, fullSource.prompt, fullSource.targetDurationSec);
   const generated = composePlan({ source: fullSource, samples: [sample], knowledge, materialSegments: segments });
+  const benchmarkScore = scoreCandidate({
+    source: fullSource,
+    sample,
+    knowledge,
+    materialSegments: segments,
+    generated,
+    usedVision: true
+  });
 
   return {
     mode: "mock",
@@ -537,8 +809,54 @@ export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
       video: materialVideo,
       segments
     },
-    generated
+    generated,
+    benchmarkScore,
+    iterations: [
+      {
+        candidateId: generated.id,
+        iterationIndex: 0,
+        compositionPlan: generated.compositionPlan,
+        timeline: generated.timeline,
+        benchmarkScore
+      }
+    ]
   };
+}
+
+function makeDimension(
+  id: BenchmarkDimensionId,
+  maxScore: number,
+  score: number,
+  evidence: string[],
+  deductions: string[],
+  fixInstruction: string
+): BenchmarkDimensionScore {
+  return {
+    id,
+    label: dimensionLabels[id],
+    score: clampScore(score, maxScore),
+    maxScore,
+    evidence: evidence.filter(Boolean).slice(0, 4),
+    deductions: deductions.filter(Boolean).slice(0, 4),
+    fixInstruction
+  };
+}
+
+function collectGeneratedText(plan: GeneratedPlan) {
+  return [
+    plan.id,
+    plan.script,
+    plan.rendererPrompt,
+    plan.demo.note,
+    ...plan.storyboard.flatMap((item) => [item.title, item.visual, item.caption, item.reason]),
+    ...plan.timeline.flatMap((item) => [item.caption, item.packaging.join(" "), item.transition ?? "", item.beatHint ?? ""]),
+    ...plan.compositionPlan.rationale,
+    ...plan.packagingSuggestions
+  ].join("\n");
+}
+
+function clampScore(value: number, maxScore: number) {
+  return Math.max(0, Math.min(maxScore, Math.round(value)));
 }
 
 function hashText(text: string) {

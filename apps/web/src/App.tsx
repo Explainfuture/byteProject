@@ -22,8 +22,7 @@ import {
   Wand2
 } from "lucide-react";
 import { Player } from "@remotion/player";
-import { creativeReconstructionSkills, inferCreativeSkillIds } from "@byteproject/shared";
-import type { CreativeReconstructionSkillId, CreativeStrategy, RunResult, SlotMatch, StructureSlot, TimelineItem, VideoStyleTrack } from "@byteproject/shared";
+import type { CreativeStrategy, RunResult, SlotMatch, StructureSlot, TimelineItem, VideoStyleTrack } from "@byteproject/shared";
 import {
   MarketingFakeVideo,
   REMOTION_FAKE_VIDEO_FPS,
@@ -33,13 +32,25 @@ import {
 } from "./remotion/FakeStructureVideos";
 
 type UploadRole = "sample";
-type AppScreen = "start" | "result";
-type ResultTab = "demo" | "structure" | "gaps" | "timeline" | "packaging" | "versions";
+type AppScreen = "start" | "result" | "history";
+type ResultTab = "demo" | "benchmark" | "structure" | "gaps" | "timeline" | "packaging" | "versions";
 type UploadedVideo = { id: string; name: string; previewUrl?: string; posterUrl?: string; templateTrack?: VideoStyleTrack };
 type VideoOrientation = "landscape" | "portrait" | "square" | "unknown";
 type AgentTraceItem = { tool: string; ok: boolean; input: unknown; observation: unknown };
 type AgentRunResult = RunResult & { agentTrace?: AgentTraceItem[]; agentMode?: "tool-calling" | "fallback" };
 type AgentTurn = { id: string; prompt: string; status: "running" | "done"; startedAt: number; result?: AgentRunResult };
+type HistoryEntry = {
+  id: string;
+  title: string;
+  prompt: string;
+  createdAt: number;
+  score: number;
+  accepted: boolean;
+  grade: RunResult["benchmarkScore"]["grade"];
+  videoName?: string;
+  result: AgentRunResult;
+  turns: AgentTurn[];
+};
 type AgentToolStep = {
   id: string;
   title: string;
@@ -47,6 +58,8 @@ type AgentToolStep = {
   meta?: string;
   status: "pending" | "running" | "done" | "fallback";
 };
+type BenchmarkScoreView = RunResult["benchmarkScore"];
+type BenchmarkDimensionView = BenchmarkScoreView["dimensionScores"][number];
 
 type AppForm = {
   prompt: string;
@@ -81,14 +94,13 @@ type StructureSkillPreset = {
 
 const resultTabs: Array<{ value: ResultTab; label: string; icon: ReactNode }> = [
   { value: "demo", label: "成片", icon: <FileVideo2 size={17} aria-hidden="true" /> },
+  { value: "benchmark", label: "评分", icon: <ScanSearch size={17} aria-hidden="true" /> },
   { value: "structure", label: "结构", icon: <Layers3 size={17} aria-hidden="true" /> },
   { value: "gaps", label: "缺口", icon: <AlertTriangle size={17} aria-hidden="true" /> },
   { value: "timeline", label: "时间线", icon: <Clapperboard size={17} aria-hidden="true" /> },
   { value: "packaging", label: "包装", icon: <PackageCheck size={17} aria-hidden="true" /> },
   { value: "versions", label: "版本", icon: <Sparkles size={17} aria-hidden="true" /> }
 ];
-
-const progressSteps = ["抽取关键帧", "拆解 Hook / Body / CTA", "分析镜头节奏", "评估可用画面", "识别素材缺口", "生成新视频方案"];
 
 const hookStyleOptions = ["痛点提问", "结果前置", "反差开场", "场景代入"];
 const aspectRatioOptions = ["9:16 竖屏", "1:1 方屏", "16:9 横屏"];
@@ -100,6 +112,8 @@ const MIN_PREVIEW_FRAME_COUNT = 4;
 const MAX_PREVIEW_FRAME_COUNT = 16;
 const SECONDS_PER_PREVIEW_FRAME = 4;
 const defaultResultTab: ResultTab = "demo";
+const HISTORY_STORAGE_KEY = "byteproject:migration-history";
+const HISTORY_LIMIT = 20;
 
 const defaultForm: AppForm = {
   prompt: "",
@@ -200,7 +214,7 @@ const structureSkillPresets: StructureSkillPreset[] = [
     form: {
       prompt:
         "把样例抽象成 MG 信息流结构：概念开场、流程拆解、能力分层、结果对比、结尾 CTA。新视频允许用标题条、卖点卡片、图标贴纸、背景图和转场补全画面，重点展示结构迁移过程和工具调用可解释性。",
-      productName: "Doubao-Seed 视频 Agent",
+      productName: "Doubao-Seed 视频智能体",
       sellingPoints: "样例理解\n结构抽取\n素材适配\n缺口补全\n时间线草案",
       targetAudience: "AI 全栈挑战赛评委、产品经理、视频创作者",
       tone: "科技感、清晰、演示友好",
@@ -371,6 +385,7 @@ export function App() {
   const [form, setForm] = useState<AppForm>(defaultForm);
   const [startValidationErrors, setStartValidationErrors] = useState<StartValidationErrors>({});
   const [agentTurns, setAgentTurns] = useState<AgentTurn[]>([]);
+  const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>(readHistoryEntries);
   const [, startTransition] = useTransition();
 
   useEffect(() => {
@@ -422,7 +437,7 @@ export function App() {
   function validateStartInputs() {
     const nextErrors: StartValidationErrors = {};
     if (!sampleVideo?.id) nextErrors.sampleVideo = "先上传一条样例视频。";
-    if (!form.prompt.trim()) nextErrors.prompt = "写一句迁移目标，Agent 才能生成新视频方向。";
+    if (!form.prompt.trim()) nextErrors.prompt = "写一句迁移目标，智能体才能生成新视频方向。";
     setStartValidationErrors(nextErrors);
     return Object.keys(nextErrors).length === 0;
   }
@@ -476,20 +491,19 @@ export function App() {
     setStartValidationErrors({});
     const visiblePrompt = (extraInstruction?.trim() || form.prompt.trim() || "请根据上传视频生成短视频方案").trim();
     const turnId = `${Date.now()}`;
-    setAgentTurns((current) => {
-      const nextTurn: AgentTurn = { id: turnId, prompt: visiblePrompt, status: "running", startedAt: Date.now() };
-      return extraInstruction?.trim() ? [...current, nextTurn] : [nextTurn];
-    });
+    const nextTurn: AgentTurn = { id: turnId, prompt: visiblePrompt, status: "running", startedAt: Date.now() };
+    const runningTurns = extraInstruction?.trim() ? [...agentTurns, nextTurn] : [nextTurn];
+    const sourceVideoName = sampleVideo?.name;
+    setAgentTurns(runningTurns);
     setIsGenerating(true);
     setScreen("result");
     if (!extraInstruction?.trim()) setActiveTab("demo");
 
     const sellingPoints = splitSellingPoints(form.sellingPoints);
-    const inferredCreativeSkillIds = inferCreativeSkillIds({ ...form, sellingPoints });
     const settingPrompt = [
       `画幅：${form.aspectRatio}`,
-      `Agent 自动选择技能：${selectedCreativeSkillNames(inferredCreativeSkillIds).join(" / ")}`,
-      `本地预览：只渲染模型从本次视频分析出的 Remotion 方案，不生成预设赛道`
+      "SKU 与工具：由主智能体在读取上传视频和 prompt 后自动选择",
+      `本地预览：渲染模型从本次视频分析出的 Remotion 方案，保持本轮证据链一致`
     ].join("\n");
     const basePrompt = `${form.prompt}\n\n视频期望参数：\n${settingPrompt}`;
     const finalPrompt = extraInstruction ? `${basePrompt}\n\n改片指令：${extraInstruction}` : basePrompt;
@@ -516,10 +530,10 @@ export function App() {
     const data = (await response.json()) as AgentRunResult;
 
     startTransition(() => {
+      const completedTurns = runningTurns.map((turn) => (turn.id === turnId ? { ...turn, status: "done" as const, result: data } : turn));
       setResult(data);
-      setAgentTurns((current) =>
-        current.map((turn) => (turn.id === turnId ? { ...turn, status: "done", result: data } : turn))
-      );
+      setAgentTurns(completedTurns);
+      setHistoryEntries((entries) => persistHistoryEntry(createHistoryEntry(data, visiblePrompt, sourceVideoName, completedTurns), entries));
       setScreen("result");
       setIsGenerating(false);
       setRevisionPrompt("");
@@ -536,6 +550,28 @@ export function App() {
     URL.revokeObjectURL(url);
   }
 
+  function openHistoryEntry(entry: HistoryEntry) {
+    setResult(entry.result);
+    setAgentTurns([historyTurnFromEntry(entry)]);
+    setSampleVideo(null);
+    setActiveTab(defaultResultTab);
+    setRevisionPrompt("");
+    setScreen("result");
+  }
+
+  function deleteHistoryEntry(entryId: string) {
+    setHistoryEntries((entries) => {
+      const next = entries.filter((entry) => entry.id !== entryId);
+      writeHistoryEntries(next);
+      return next;
+    });
+  }
+
+  function clearHistoryEntries() {
+    setHistoryEntries([]);
+    writeHistoryEntries([]);
+  }
+
   if (isLoading || !result) {
     return (
       <main className="loading-screen" aria-live="polite">
@@ -547,38 +583,211 @@ export function App() {
 
   return (
     <main className={`app-shell screen-${screen}`}>
-      {screen === "start" ? (
-        <StartScreen
-          form={form}
-          setForm={setForm}
-          validationErrors={startValidationErrors}
-          sampleVideo={sampleVideo}
-          canGenerate={hasUploadedInputs && Boolean(form.prompt.trim())}
-          onUpload={uploadVideo}
-          onGenerate={() => generate(undefined, { requireStartInputs: true })}
-          isGenerating={isGenerating}
-        />
-      ) : null}
+      <WorkbenchShell
+        screen={screen}
+        benchmarkScore={result.benchmarkScore.totalScore}
+        historyCount={historyEntries.length}
+        onShowStart={() => setScreen("start")}
+        onShowResult={() => setScreen("result")}
+        onShowBenchmark={() => {
+          setActiveTab("benchmark");
+          setScreen("result");
+        }}
+        onShowHistory={() => setScreen("history")}
+      >
+        {screen === "start" ? (
+          <StartScreen
+            form={form}
+            setForm={setForm}
+            validationErrors={startValidationErrors}
+            sampleVideo={sampleVideo}
+            canGenerate={hasUploadedInputs && Boolean(form.prompt.trim())}
+            onUpload={uploadVideo}
+            onGenerate={() => generate(undefined, { requireStartInputs: true })}
+            isGenerating={isGenerating}
+          />
+        ) : null}
 
-      {screen === "result" ? (
-        <ResultWorkspace
-          result={result}
-          agentTurns={agentTurns}
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          totalDuration={totalDuration}
-          sampleVideo={sampleVideo}
-          slots={slots}
-          matches={matches}
-          revisionPrompt={revisionPrompt}
-          setRevisionPrompt={setRevisionPrompt}
-          onRegenerate={() => generate()}
-          onNaturalLanguageRegenerate={() => generate(revisionPrompt)}
-          onExport={exportResult}
-          isGenerating={isGenerating}
-        />
-      ) : null}
+        {screen === "result" ? (
+          <ResultWorkspace
+            result={result}
+            agentTurns={agentTurns}
+            activeTab={activeTab}
+            setActiveTab={setActiveTab}
+            totalDuration={totalDuration}
+            sampleVideo={sampleVideo}
+            slots={slots}
+            matches={matches}
+            revisionPrompt={revisionPrompt}
+            setRevisionPrompt={setRevisionPrompt}
+            onRegenerate={() => generate()}
+            onNaturalLanguageRegenerate={() => generate(revisionPrompt)}
+            onExport={exportResult}
+            isGenerating={isGenerating}
+          />
+        ) : null}
+
+        {screen === "history" ? (
+          <HistoryWorkspace
+            entries={historyEntries}
+            onOpen={openHistoryEntry}
+            onDelete={deleteHistoryEntry}
+            onClear={clearHistoryEntries}
+            onNewMigration={() => setScreen("start")}
+          />
+        ) : null}
+      </WorkbenchShell>
     </main>
+  );
+}
+
+function WorkbenchShell(props: {
+  screen: AppScreen;
+  benchmarkScore?: number;
+  historyCount: number;
+  onShowStart: () => void;
+  onShowResult: () => void;
+  onShowBenchmark: () => void;
+  onShowHistory: () => void;
+  children: ReactNode;
+}) {
+  const navItems = [
+    { label: "控制台", icon: <Layers3 size={16} aria-hidden="true" />, active: false, onClick: props.onShowStart },
+    { label: "迁移任务", icon: <Clapperboard size={16} aria-hidden="true" />, active: props.screen === "start", onClick: props.onShowStart },
+    { label: "智能体日志", icon: <Cpu size={16} aria-hidden="true" />, active: props.screen === "result", onClick: props.onShowResult },
+    { label: "历史记录", icon: <RefreshCcw size={16} aria-hidden="true" />, active: props.screen === "history", onClick: props.onShowHistory, badge: props.historyCount },
+    { label: "评分基准", icon: <ScanSearch size={16} aria-hidden="true" />, active: false, onClick: props.onShowBenchmark },
+    { label: "素材库", icon: <PackageCheck size={16} aria-hidden="true" />, active: false, onClick: props.onShowStart }
+  ];
+  const statusLabel = props.screen === "history" ? "历史记录" : props.screen === "result" ? "处理完成" : "新建迁移";
+  return (
+    <div className={`workbench-shell ${props.screen === "result" ? "processing" : "initial"}`}>
+      <aside className="workbench-sidenav" aria-label="工作台导航">
+        <div className="sidenav-brand">
+          <div className="brand-emblem">
+            <Cpu size={18} aria-hidden="true" />
+          </div>
+          <div>
+            <strong>爆款迁移</strong>
+            <span>演示项目 v6</span>
+          </div>
+        </div>
+        <nav className="sidenav-links">
+          {navItems.map((item) => (
+            <button key={item.label} type="button" className={item.active ? "active" : ""} onClick={item.onClick}>
+              {item.icon}
+              <span>{item.label}</span>
+              {item.badge ? <em>{item.badge}</em> : null}
+            </button>
+          ))}
+        </nav>
+        <div className="sidenav-footer">
+          <a href="#">支持</a>
+          <a href="#">设置</a>
+          <button type="button">升级方案</button>
+        </div>
+      </aside>
+      <div className="workbench-main">
+        <header className="workbench-topnav">
+          <div className="job-context">
+            <span>作业 ID：MGR-8924</span>
+            <strong>{statusLabel}</strong>
+          </div>
+          <nav>
+            <button type="button" className={props.screen === "start" ? "active" : ""} onClick={props.onShowStart}>控制台</button>
+            <button type="button" onClick={props.onShowResult}>项目</button>
+            <button type="button" className={props.screen === "history" ? "active" : ""} onClick={props.onShowHistory}>历史</button>
+            <button type="button" onClick={props.onShowBenchmark}>评分基准</button>
+          </nav>
+          <div className="topnav-actions">
+            {props.screen === "history" ? (
+              <span className="score-chip">{props.historyCount} 条历史</span>
+            ) : props.screen === "result" ? (
+              <span className="score-chip">{props.benchmarkScore ?? "--"}/100</span>
+            ) : (
+              <span className="score-chip">就绪</span>
+            )}
+            <button type="button">文档</button>
+          </div>
+        </header>
+        <div className="workbench-content">{props.children}</div>
+      </div>
+    </div>
+  );
+}
+
+function HistoryWorkspace(props: {
+  entries: HistoryEntry[];
+  onOpen: (entry: HistoryEntry) => void;
+  onDelete: (entryId: string) => void;
+  onClear: () => void;
+  onNewMigration: () => void;
+}) {
+  return (
+    <section className="history-shell" aria-labelledby="history-title">
+      <header className="history-header">
+        <div>
+          <span>运行历史</span>
+          <h1 id="history-title">迁移历史</h1>
+          <p>每次主智能体完成生成和 benchmark 后，会保留这一轮的 prompt、分数和工具流结果。</p>
+        </div>
+        <div className="history-header-actions">
+          <button type="button" className="secondary-button" onClick={props.onClear} disabled={!props.entries.length}>
+            清空历史
+          </button>
+          <button type="button" className="primary-button" onClick={props.onNewMigration}>
+            <Send size={17} aria-hidden="true" />
+            新建迁移
+          </button>
+        </div>
+      </header>
+
+      {props.entries.length ? (
+        <div className="history-grid" aria-label="历史记录列表">
+          {props.entries.map((entry) => (
+            <article key={entry.id} className={`history-card ${entry.accepted ? "accepted" : "needs-work"}`}>
+              <header>
+                <span>{formatHistoryTime(entry.createdAt)}</span>
+                <strong>{benchmarkGradeLabel(entry.grade)}</strong>
+              </header>
+              <h2>{entry.title}</h2>
+              <p>{entry.prompt}</p>
+              <div className="history-meta">
+                <span>{entry.videoName ?? entry.result.samples[0]?.video.fileName ?? "参考视频"}</span>
+                <span>{historyDuration(entry.result)} 秒</span>
+                <span>{entry.result.generated.timeline.length} 段</span>
+              </div>
+              <div className="history-score">
+                <div>
+                  <strong>{entry.score}</strong>
+                  <span>/100</span>
+                </div>
+                <i style={{ "--score": `${Math.max(0, Math.min(100, entry.score))}%` } as CSSProperties} />
+              </div>
+              <div className="history-card-actions">
+                <button type="button" className="primary-button" onClick={() => props.onOpen(entry)}>
+                  打开结果
+                </button>
+                <button type="button" className="secondary-button" onClick={() => props.onDelete(entry.id)}>
+                  删除
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <div className="history-empty">
+          <div className="agent-ready-icon" aria-hidden="true">
+            <RefreshCcw size={34} />
+          </div>
+          <h2>还没有迁移历史</h2>
+          <p>完成一次生成后，这里会出现可恢复的结果记录。</p>
+          <button type="button" className="primary-button" onClick={props.onNewMigration}>
+            去新建迁移
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -597,7 +806,7 @@ function StartScreen(props: {
       <div className="studio-shell">
         <header className="studio-topbar">
           <div className="brand-block">
-            <span className="product-mark">AI Creation Studio</span>
+            <span className="product-mark">AI 创作工作台</span>
             <h1 id="start-title">爆款结构迁移引擎</h1>
           </div>
         </header>
@@ -610,8 +819,8 @@ function StartScreen(props: {
         </div>
 
         <div className="studio-workspace">
-          <section className="workspace-panel input-panel" aria-label="素材输入区">
-            <SectionHeading eyebrow="01 Video" title="单视频输入" note="上传样例或评测素材，系统按中等抽帧预算拆解可迁移结构。" />
+          <section className={`workspace-panel input-panel ${props.sampleVideo ? "has-video" : ""}`} aria-label="素材输入区">
+            <SectionHeading eyebrow="参考素材" title="新建迁移" note="定义结构分析所需的输入参数。" />
             <div className="upload-list">
               <UploadAction role="sample" label="上传视频" hint="选择视频文件" video={props.sampleVideo} onFile={props.onUpload} error={props.validationErrors.sampleVideo} />
             </div>
@@ -619,7 +828,7 @@ function StartScreen(props: {
               <VideoPreview
                 title="视频预览"
                 video={props.sampleVideo}
-                emptyText="等待上传视频"
+                emptyText="放入视频后预览"
                 hints={["建议 10-60 秒", "中等抽帧 4-16 张"]}
               />
               <div className="frame-insight-card">
@@ -638,44 +847,83 @@ function StartScreen(props: {
               </div>
             </div>
             <div className="input-status-strip" aria-live="polite">
-              <span className={props.sampleVideo ? "ready" : ""}>{props.sampleVideo ? "视频已就绪" : "等待视频"}</span>
-              <span className={props.sampleVideo ? "ready" : ""}>{props.sampleVideo ? "可开始抽帧拆解" : "等待抽帧"}</span>
+              <span className={props.sampleVideo ? "ready" : ""}>{props.sampleVideo ? "视频已就绪" : "先放入视频"}</span>
+              <span className={props.sampleVideo ? "ready" : ""}>{props.sampleVideo ? "可开始抽帧拆解" : "准备读帧"}</span>
             </div>
             {!props.sampleVideo ? (
               <div className="analysis-only-note">
-                <strong>等待真实视频</strong>
-                <span>上传后才会开始抽帧分析；不会用示例素材或预设模板生成结果。</span>
+                <strong>先给我一条视频</strong>
+                <span>视频进来后我先读画面、节奏和字幕证据，再决定 SKU 和工具链。</span>
               </div>
             ) : null}
-          </section>
-
-          <section className="workspace-panel intent-panel" aria-label="AI 拆解与创作目标区">
-            <SectionHeading eyebrow="02 Brief" title="迁移目标" note="告诉 Agent 要把上传视频迁移成什么成片方向。" />
-            <AutoCreativeSkillPanel form={props.form} />
-            <SettingsPanel form={props.form} setForm={props.setForm} errors={props.validationErrors} />
-          </section>
-
-          <aside className="workspace-panel control-panel" aria-label="生成控制区">
-            <SectionHeading eyebrow="03 Generate" title="生成方案" note="基于本次视频分析生成 Remotion 预览方案；没有分析结果时不输出预设。" />
-            <details className="ai-plan-preview" aria-label="AI 方案预览">
-              <summary>查看 AI 会分析什么</summary>
-              <ul>
-                <li>开头钩子</li>
-                <li>镜头节奏</li>
-                <li>字幕结构</li>
-                <li>画面包装</li>
-                <li>转场与 BGM 节点</li>
-              </ul>
-            </details>
-            <GenerationControls form={props.form} setForm={props.setForm} />
-            <div className="control-footer">
-              <p>{props.canGenerate ? "生成脚本结构、镜头节奏表和迁移版创作方案。" : "点击后会标出还缺的视频或迁移目标。"}</p>
-              <button type="button" className="start-button" aria-label="开始 AI 拆解并生成方案" onClick={props.onGenerate} disabled={props.isGenerating}>
-                {props.isGenerating ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Wand2 size={18} aria-hidden="true" />}
-                开始 AI 拆解并生成方案
+            <form
+              className="agent-start-form migration-start-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                props.onGenerate();
+              }}
+            >
+              <SettingsPanel form={props.form} setForm={props.setForm} errors={props.validationErrors} />
+              <GenerationControls form={props.form} setForm={props.setForm} />
+              <button type="submit" className="start-button" aria-label="发送给主智能体" disabled={props.isGenerating || !props.canGenerate}>
+                {props.isGenerating ? <Loader2 className="spin" size={18} aria-hidden="true" /> : <Send size={18} aria-hidden="true" />}
+                发送给主智能体
               </button>
-            </div>
+            </form>
+          </section>
+
+          <aside className="workspace-panel start-agent-panel" aria-label="智能体对话流">
+            <StartAgentPanel
+              sampleVideo={props.sampleVideo}
+              canGenerate={props.canGenerate}
+            />
           </aside>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function StartAgentPanel(props: { sampleVideo: UploadedVideo | null; canGenerate: boolean }) {
+  return (
+    <section className="video-agent-panel start-agent-flow" aria-label="主智能体对话流">
+      <header className="agent-panel-header">
+        <div className="agent-orb" aria-hidden="true">
+          <Cpu size={17} />
+        </div>
+        <div>
+          <span>主智能体</span>
+          <strong>Doubao-Seed 2.0 Lite 工具流</strong>
+        </div>
+      </header>
+
+      <div className="agent-ready-state">
+        <div className="agent-ready-icon" aria-hidden="true">
+          <Sparkles size={34} />
+        </div>
+        <h2>智能体就绪</h2>
+        <div className="agent-ready-bubble">
+          <p>
+            {props.sampleVideo
+              ? props.canGenerate
+                ? "视频和迁移目标都齐了。点击发送后，我会读取视觉证据、节奏和字幕线索，再决定 SKU 和工具链。"
+                : "视频已经放进来。再补一句迁移目标，我就能判断结构路线。"
+              : "先把视频放进来。我会分析视觉证据、节奏和字幕线索，再判断 SKU 与工具链。"}
+          </p>
+        </div>
+        <div className="agent-ready-signals" aria-label="智能体输入信号">
+          <div>
+            <ScanSearch size={18} aria-hidden="true" />
+            <span>视觉</span>
+          </div>
+          <div>
+            <MessageSquareText size={18} aria-hidden="true" />
+            <span>字幕</span>
+          </div>
+          <div>
+            <Clapperboard size={18} aria-hidden="true" />
+            <span>节奏</span>
+          </div>
         </div>
       </div>
     </section>
@@ -688,6 +936,7 @@ function SectionHeading(props: { eyebrow: string; title: string; note?: string }
       <span>{props.eyebrow}</span>
       <div>
         <strong>{props.title}</strong>
+        {props.note ? <p>{props.note}</p> : null}
       </div>
     </div>
   );
@@ -752,32 +1001,6 @@ function TemplateSamplePlayer(props: { preset: StructureSkillPreset }) {
         style={{ width: "100%" }}
       />
     </div>
-  );
-}
-
-function AutoCreativeSkillPanel(props: { form: AppForm }) {
-  const selected = new Set(inferCreativeSkillIds({ ...props.form, sellingPoints: splitSellingPoints(props.form.sellingPoints) }));
-
-  return (
-    <section className="creative-skill-selector" aria-label="Agent 自动选择 SKU">
-      <div className="skill-selector-head">
-        <span>Agent 自动选择 SKU</span>
-        <strong>{selected.size} 个已匹配</strong>
-      </div>
-      <div className="creative-skill-grid">
-        {creativeReconstructionSkills.filter((skill) => selected.has(skill.id)).map((skill) => (
-          <article
-            key={skill.id}
-            className="auto-skill-card active"
-            title={skill.guardrail}
-          >
-            <strong>{skill.shortName}</strong>
-            <span>{skill.name}</span>
-            <small>{skill.description}</small>
-          </article>
-        ))}
-      </div>
-    </section>
   );
 }
 
@@ -971,7 +1194,7 @@ function TemplatePreviewPlayer(props: { video: UploadedVideo }) {
         compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
         inputProps={{
           productName: props.video.name.replace(" 本地示例", ""),
-          points: ["本地示例素材", "可直接进入 Agent 流", "生成 MP4 草稿"],
+          points: ["本地示例素材", "可直接进入智能体流", "生成 MP4 草稿"],
           audience: "参赛演示",
           variant: props.video.templateTrack as FakeVideoVariant
         }}
@@ -1040,6 +1263,7 @@ function ResultWorkspace(props: {
           {props.activeTab === "demo" ? (
             <DemoPanel result={props.result} totalDuration={props.totalDuration} sampleVideo={props.sampleVideo} setActiveTab={props.setActiveTab} />
           ) : null}
+          {props.activeTab === "benchmark" ? <BenchmarkPanel result={props.result} /> : null}
           {props.activeTab === "structure" ? <StructureMapping result={props.result} matches={props.matches} /> : null}
           {props.activeTab === "gaps" ? <GapDiagnosis slots={props.slots} matches={props.matches} /> : null}
           {props.activeTab === "timeline" ? <TimelineEditor items={props.result.generated.timeline} slots={props.slots} /> : null}
@@ -1059,6 +1283,58 @@ function ResultWorkspace(props: {
           />
         </aside>
       </div>
+    </section>
+  );
+}
+
+function BenchmarkPanel(props: { result: RunResult }) {
+  const score = props.result.benchmarkScore;
+  const weakestDimension = weakestBenchmarkDimension(score);
+  return (
+    <section className="benchmark-panel" aria-labelledby="benchmark-title">
+      <PanelTitle icon={<ScanSearch size={19} aria-hidden="true" />} title="基准评分" note="" id="benchmark-title" />
+      <div className={`benchmark-summary ${score.accepted ? "accepted" : "needs-work"}`}>
+        <strong>{score.totalScore}</strong>
+        <span>/ 100</span>
+        <p>{benchmarkSummaryLabel(score, weakestDimension)}</p>
+      </div>
+
+      {score.hardFailures.length ? (
+        <div className="benchmark-hard-failures">
+          {score.hardFailures.map((failure) => (
+            <article key={failure.code}>
+              <strong>{hardFailureTitle(failure.code)}</strong>
+              <p>{agentReadableText(failure.reason)}</p>
+            </article>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="benchmark-dimensions">
+        {score.dimensionScores.map((dimension) => (
+          <article key={dimension.id}>
+            <header>
+              <strong>{dimension.label}</strong>
+              <span>
+                {dimension.score}/{dimension.maxScore}
+              </span>
+            </header>
+            <p>{agentReadableText(dimension.evidence[0] ?? dimension.fixInstruction)}</p>
+            {dimension.deductions[0] ? <small>{agentReadableText(dimension.deductions[0])}</small> : null}
+          </article>
+        ))}
+      </div>
+
+      {score.topFixes.length ? (
+        <div className="benchmark-fixes">
+          <strong>{score.accepted ? "保留的强项" : `我下一轮先改${weakestDimension ? `：${weakestDimension.label}` : ""}`}</strong>
+          <ul>
+            {score.topFixes.map((fix) => (
+              <li key={fix}>{agentReadableText(fix)}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -1087,6 +1363,10 @@ function DemoPanel(props: { result: RunResult; totalDuration: number; sampleVide
       <div className="demo-explain">
         <h2 id="demo-title">{generatedVideoUrl ? "已生成自动化视频草稿" : `已生成 ${props.totalDuration} 秒结构化预览`}</h2>
         <div className="demo-buttons">
+          <button type="button" onClick={() => props.setActiveTab("benchmark")}>
+            <ScanSearch size={16} aria-hidden="true" />
+            <span>查看 benchmark</span>
+          </button>
           <button type="button" onClick={() => props.setActiveTab("structure")}>
             <Layers3 size={16} aria-hidden="true" />
             <span>查看结构迁移</span>
@@ -1180,14 +1460,14 @@ function VideoAgentPanel(props: {
   const turns = props.turns.length ? props.turns : [fallbackTurn];
 
   return (
-    <section className="video-agent-panel" aria-label="视频 Agent 对话">
+    <section className="video-agent-panel" aria-label="视频智能体对话">
       <header className="agent-panel-header">
         <div className="agent-orb" aria-hidden="true">
           <Cpu size={17} />
         </div>
         <div>
-          <span>VIDEO AGENT</span>
-          <strong>Doubao-Seed 工具流</strong>
+          <span>迁移智能体</span>
+          <strong>智能体执行日志</strong>
         </div>
       </header>
 
@@ -1203,7 +1483,7 @@ function VideoAgentPanel(props: {
             <div className="agent-turn" key={turn.id}>
               <div className="chat-row user">
                 <div className="agent-bubble user-bubble">
-                  <span>USER</span>
+                  <span>用户</span>
                   <p>{turn.prompt}</p>
                 </div>
               </div>
@@ -1212,8 +1492,8 @@ function VideoAgentPanel(props: {
                   <Bot size={16} />
                 </div>
                 <div className="agent-bubble ai-bubble">
-                  <span>VIDEO AGENT</span>
-                  <p className="agent-dynamic-intro">{agentTurnIntro(turn, activeStep, Boolean(turnResult))}</p>
+                  <span>视频智能体</span>
+                  <p className="agent-dynamic-intro">{agentTurnIntro(turn, activeStep, turnResult)}</p>
                 </div>
               </div>
               {isLatestTurn ? (
@@ -1229,7 +1509,7 @@ function VideoAgentPanel(props: {
                     <Sparkles size={16} />
                   </div>
                   <div className="agent-bubble ai-bubble final">
-                    <span>RESULT</span>
+                    <span>结果</span>
                     <p>{agentResultSummary(turnResult)}</p>
                   </div>
                 </div>
@@ -1256,7 +1536,7 @@ function VideoAgentPanel(props: {
             onChange={(event) => props.setValue(event.target.value)}
             placeholder="让开头更抓人 / 卖点提前 / 减少字幕 / 强化卡点..."
           />
-          <button type="submit" disabled={props.disabled} aria-label="发送给视频 Agent">
+          <button type="submit" disabled={props.disabled} aria-label="发送给视频智能体">
             <Send size={16} aria-hidden="true" />
           </button>
         </div>
@@ -1283,12 +1563,40 @@ function AgentToolCall(props: { step: AgentToolStep }) {
       <div>
         <header>
           <strong>{props.step.title}</strong>
-          {props.step.meta ? <span>{props.step.meta}</span> : null}
+          {props.step.meta ? <span>{toolMetaLabel(props.step.meta)}</span> : null}
         </header>
         <p>{props.step.detail}</p>
       </div>
     </article>
   );
+}
+
+function toolMetaLabel(meta: string) {
+  const labels: Record<string, string> = {
+    input: "输入",
+    agent: "智能体",
+    compose: "生成",
+    score: "评分",
+    frames: "关键帧",
+    model: "模型",
+    plan: "方案",
+    render: "渲染",
+    result: "结果",
+    pass: "通过",
+    fail: "未通过",
+    needs_iteration: "待迭代",
+    excellent: "优秀",
+    mp4: "MP4",
+    blocked: "受阻",
+    draft: "草稿",
+    fallback: "兜底",
+    vision: "视觉",
+    structure: "结构",
+    "frame tool": "抽帧",
+    "gap plan": "缺口",
+    "preview ready": "预览就绪"
+  };
+  return labels[meta] ?? meta;
 }
 
 function currentAgentToolStep(steps: AgentToolStep[]): AgentToolStep {
@@ -1300,8 +1608,8 @@ function currentAgentToolStep(steps: AgentToolStep[]): AgentToolStep {
       .find((step) => step.status !== "pending") ??
     steps[0] ?? {
       id: "idle",
-      title: "等待工具调用",
-      detail: "上传视频后开始分析。",
+      title: "准备工具调用",
+      detail: "视频进来后开始分析。",
       meta: "idle",
       status: "pending"
     }
@@ -1310,12 +1618,12 @@ function currentAgentToolStep(steps: AgentToolStep[]): AgentToolStep {
 
 function currentLiveAgentStepIndex(startedAt: number, now: number) {
   const elapsed = Math.max(0, now - startedAt);
-  const thresholds = [0, 1200, 3200, 5600, 8200, 11000];
+  const thresholds = [0, 1200, 3200, 5600, 8200, 11000, 13200];
   let index = 0;
   for (const [candidate, threshold] of thresholds.entries()) {
     if (elapsed >= threshold) index = candidate;
   }
-  return Math.min(index, progressSteps.length - 1);
+  return Math.min(index, thresholds.length - 1);
 }
 
 function visibleAgentToolSteps(steps: AgentToolStep[], isDone: boolean) {
@@ -1324,10 +1632,72 @@ function visibleAgentToolSteps(steps: AgentToolStep[], isDone: boolean) {
   return visible.slice(-3);
 }
 
-function agentTurnIntro(turn: AgentTurn, activeStep: AgentToolStep, hasResult: boolean) {
-  if (hasResult) return "本轮模型调用已返回，下面是服务端收到的真实工具链结果。";
-  if (turn.status === "running") return `正在执行：${activeStep.title}。我会等模型返回结构化制作规范后再更新结果。`;
-  return "等待下一轮指令。";
+function agentTurnIntro(turn: AgentTurn, activeStep: AgentToolStep, result?: AgentRunResult) {
+  if (result) return agentBenchmarkVerdict(result);
+  if (turn.status === "running") return `我在处理「${activeStep.title}」：${activeStep.detail}`;
+  return "我会沿着上一轮的结构判断继续改。";
+}
+
+function agentBenchmarkVerdict(result: AgentRunResult) {
+  const score = result.benchmarkScore;
+  const weakest = weakestBenchmarkDimension(score);
+  const strongest = strongestBenchmarkDimension(score);
+  if (result.generated.demo.status === "failed") {
+    return `这轮卡在成片阶段，我会先看${hardFailureTitle(score.hardFailures[0]?.code)}，再决定怎么重新进渲染。`;
+  }
+  if (score.accepted) {
+    return `我看完成片抽帧了，这版能收${strongest ? `，强项在${strongest.label}` : ""}。下面是证据链。`;
+  }
+  return `我看完成片抽帧了，这版先打回。分数主要被${weakest?.label ?? "结构完整度"}拉低，下面是我的判断链。`;
+}
+
+function benchmarkSummaryLabel(score: BenchmarkScoreView, weakest?: BenchmarkDimensionView) {
+  if (score.accepted) return "这版可以收，进入最终输出";
+  if (score.hardFailures.length) return `这版先打回，${hardFailureTitle(score.hardFailures[0].code)}要先处理`;
+  if (score.totalScore < score.threshold.regenerateBelow) return `这版先打回，短板在${weakest?.label ?? "结构完整度"}`;
+  return `能跑，但我会继续压${weakest?.label ?? "最弱维度"}`;
+}
+
+function weakestBenchmarkDimension(score: BenchmarkScoreView) {
+  return score.dimensionScores
+    .slice()
+    .sort((left, right) => left.score / left.maxScore - right.score / right.maxScore || left.score - right.score)[0];
+}
+
+function strongestBenchmarkDimension(score: BenchmarkScoreView) {
+  return score.dimensionScores
+    .slice()
+    .sort((left, right) => right.score / right.maxScore - left.score / left.maxScore || right.score - left.score)[0];
+}
+
+function hardFailureTitle(code?: string) {
+  const labels: Record<string, string> = {
+    missing_real_slots: "结构证据不够",
+    empty_preview: "成片证据不够",
+    copied_sample_content: "迁移边界过近",
+    brief_mismatch: "用户目标没吃透",
+    sensitive_leak: "敏感信息风险"
+  };
+  return labels[code ?? ""] ?? "关键阻塞";
+}
+
+function compactAgentText(value?: string) {
+  return agentReadableText(value)
+    .replace(/^建议/, "")
+    .replace(/[。.]$/, "")
+    .trim();
+}
+
+function agentReadableText(value?: string) {
+  if (!value) return "";
+  return value
+    .replace(/模型制作规范失败，本轮不会使用本地规则假生成视频。?/g, "我需要先拿到可执行制作规范，再进入渲染。")
+    .replace(/没有真实分析结果时不会补预设结构。?/g, "先等结构证据回来，再画映射。")
+    .replace(/这里不会用默认缺口卡片占位。?/g, "slotMatches 回来后再列缺口。")
+    .replace(/不会用 Hook\/商品展示等默认轨道占位。?/g, "timeline 回来后再画轨道。")
+    .replace(/不会补大字标题条、卖点卡片等默认建议。?/g, "包装建议会跟随样例分析生成。")
+    .replace(/不会展示高点击\/高转化等固定预设。?/g, "版本会从本次模型方案派生。")
+    .trim();
 }
 
 function StructureMapping(props: { result: RunResult; matches: SlotMatch[] }) {
@@ -1338,7 +1708,7 @@ function StructureMapping(props: { result: RunResult; matches: SlotMatch[] }) {
     .filter((row) => row.timeline);
 
   if (!rows.length) {
-    return <EmptyResultState title="还没有可展示的结构映射" detail="模型需要先从样例视频里分析出结构槽位和 timeline；没有真实分析结果时不会补预设结构。" />;
+    return <EmptyResultState title="结构映射还在路上" detail="我会先拿到结构槽位和 timeline，再把样例方法映射到新视频。" />;
   }
 
   return (
@@ -1377,7 +1747,7 @@ function GapDiagnosis(props: { slots: StructureSlot[]; matches: SlotMatch[] }) {
   const visibleGaps = gaps;
 
   if (!props.matches.length) {
-    return <EmptyResultState title="还没有素材诊断" detail="等待模型返回 slotMatches 后再展示缺口；这里不会用默认缺口卡片占位。" />;
+    return <EmptyResultState title="素材诊断还在路上" detail="slotMatches 回来后，我会按槽位判断哪些画面够用、哪些要用文案或包装补强。" />;
   }
 
   if (!visibleGaps.length) {
@@ -1415,7 +1785,7 @@ function TimelineEditor(props: { items: TimelineItem[]; slots: StructureSlot[] }
   const slotById = new Map(props.slots.map((slot) => [slot.id, slot]));
 
   if (!props.items.length) {
-    return <EmptyResultState title="还没有编辑时间线" detail="模型需要返回可执行 timeline 后才展示轨道；不会用 Hook/商品展示等默认轨道占位。" />;
+    return <EmptyResultState title="编辑时间线还在路上" detail="拿到可执行 timeline 后，我会把镜头、字幕、包装和音频节奏拆成轨道。" />;
   }
 
   return (
@@ -1455,7 +1825,7 @@ function TimelineTrack(props: { total: number; label: string; items: Array<{ id:
 
 function PackagingPanel(props: { result: RunResult }) {
   if (!props.result.generated.packagingSuggestions.length) {
-    return <EmptyResultState title="还没有包装建议" detail="等待模型基于样例分析生成包装指令；不会补大字标题条、卖点卡片等默认建议。" />;
+    return <EmptyResultState title="包装建议还在路上" detail="我会基于样例的字幕密度、卖点推进和画面节奏生成包装指令。" />;
   }
   const suggestions = props.result.generated.packagingSuggestions;
   return (
@@ -1477,7 +1847,7 @@ function PackagingPanel(props: { result: RunResult }) {
 function VersionCards(props: { result: RunResult }) {
   const variants = props.result.generated.previewVariants;
   if (!variants.length) {
-    return <EmptyResultState title="没有模型派生版本" detail="版本必须由本次视频分析和模型方案生成；不会展示高点击/高转化等固定预设。" />;
+    return <EmptyResultState title="模型派生版本还在路上" detail="等本次方案稳定后，我会从同一套结构里拆出可比较的版本。" />;
   }
   return (
     <section className="versions-panel" aria-labelledby="versions-title">
@@ -1599,12 +1969,49 @@ function publicRationale(value?: string) {
     .trim();
 }
 
+function buildStartAgentSteps(sampleVideo: UploadedVideo | null, canGenerate: boolean): AgentToolStep[] {
+  const uploaded = Boolean(sampleVideo);
+  const ready = uploaded && canGenerate;
+  return [
+    {
+      id: "upload",
+      title: uploaded ? "视频已进入智能体" : "先放入视频",
+      detail: uploaded ? `我会先读 ${sampleVideo?.name} 的画面结构，再选择 SKU。` : "给我视频和目标后，我再判断该走哪组 SKU 与工具。",
+      meta: "input",
+      status: uploaded ? "done" : "pending"
+    },
+    {
+      id: "sku",
+      title: "主智能体判断路线",
+      detail: ready
+        ? "视频和目标都齐了；点击发送后，Doubao-Seed 2.0 Lite 再选择结构迁移、首尾帧/意图分析、拼接或评分工具。"
+        : "Doubao-Seed 2.0 Lite 会结合视频证据和 prompt，决定要用结构迁移、首尾帧/意图分析、拼接还是评分工具。",
+      meta: "agent",
+      status: "pending"
+    },
+    {
+      id: "render",
+      title: "生成并拼接视频草稿",
+      detail: "生成时间线、首尾帧意图、包装层和 Remotion/FFmpeg 成片草稿。",
+      meta: "compose",
+      status: "pending"
+    },
+    {
+      id: "benchmark",
+      title: "抽帧基准评分",
+      detail: "成片后抽帧做结构化评分；分数低就产出 revisionBrief，分数够就输出最终结果。",
+      meta: "score",
+      status: "pending"
+    }
+  ];
+}
+
 function buildLiveAgentSteps(currentIndex: number, sampleVideo: UploadedVideo | null): AgentToolStep[] {
   const liveDetails = [
     {
       id: "ingest",
       title: "接收视频与 Brief",
-      detail: sampleVideo ? `已接收 ${sampleVideo.name}，等待进入抽帧队列。` : "等待上传视频进入工具链。",
+      detail: sampleVideo ? `我先读 ${sampleVideo.name} 的画面和 Brief，再进入抽帧。` : "视频放入后进入工具链。",
       meta: "input"
     },
     {
@@ -1649,38 +2056,44 @@ function buildDynamicLiveAgentSteps(currentIndex: number, sampleVideo: UploadedV
   const liveDetails = [
     {
       id: "ingest",
-      title: "接收视频与指令",
-      detail: sampleVideo ? `已接收 ${sampleVideo.name}，准备抽取关键帧。` : "等待上传视频进入模型链路。",
+      title: "读视频与目标",
+      detail: sampleVideo ? `我先看 ${sampleVideo.name} 的画面、时长和目标，再决定怎么拆。` : "视频放进来后，我会先读画面证据。",
       meta: "input"
     },
     {
       id: "frames",
       title: "抽取关键帧",
-      detail: "服务端正在从视频时间轴采样关键帧，用于让模型解析画面结构、节奏和包装方式。",
+      detail: "我在沿时间轴采样关键帧，用来判断开头、节奏、字幕密度和包装方式。",
       meta: "frames"
     },
     {
       id: "vision",
-      title: "请求 Doubao 视觉理解",
-      detail: "把关键帧、视频元数据和本轮指令发给模型，要求模型解析爆款制作方法。",
+      title: "让模型拆结构",
+      detail: "把关键帧、视频元数据和本轮指令交给模型，拆出可迁移的制作方法。",
       meta: "model"
     },
     {
       id: "plan",
-      title: "生成模型制作规范",
-      detail: "等待模型输出 slotMatches、timeline、assetIds、分镜、字幕、包装和预期效果。",
+      title: "把结构改写成方案",
+      detail: "我会把 slotMatches、timeline、分镜、字幕、包装和预期效果合成可执行规范。",
       meta: "plan"
     },
     {
       id: "render",
-      title: "服务端执行渲染",
-      detail: "服务端只按模型返回的制作规范截取、重排、拼接并写出 MP4。",
+      title: "渲染成片草稿",
+      detail: "按制作规范截取、重排、拼接并写出 MP4 草稿。",
       meta: "render"
     },
     {
+      id: "benchmark",
+      title: "抽帧基准评分",
+      detail: "成片草稿会被抽帧分析；我会根据分数决定收片还是返工。",
+      meta: "score"
+    },
+    {
       id: "result",
-      title: "同步生成结果",
-      detail: "等待后端返回真实工具 trace 和最终成片状态。",
+      title: "整理本轮判断",
+      detail: "把工具 trace、成片状态和 benchmark 短板合成下一步结论。",
       meta: "result"
     }
   ];
@@ -1700,11 +2113,14 @@ function buildDynamicResultAgentSteps(result: AgentRunResult, sampleVideo: Uploa
   const planTrace = result.agentTrace?.find((item) => item.tool === "model_plan_composer" || item.tool === "compose_video_plan");
   const rendered = result.generated.demo.status === "rendered";
   const failed = result.generated.demo.status === "failed";
+  const score = result.benchmarkScore;
+  const weakestDimension = weakestBenchmarkDimension(score);
+  const benchmarkFix = compactAgentText(score.revisionBrief?.failedDimensions[0]?.instruction ?? score.topFixes[0]);
 
   return [
     {
       id: "ingest",
-      title: "接收视频与指令",
+      title: "读片和目标",
       detail: `${visibleVideoName} · ${Math.round(sample?.video.durationSec ?? duration)}s · ${sample?.video.width ?? "-"}x${sample?.video.height ?? "-"}`,
       meta: "input",
       status: "done"
@@ -1712,36 +2128,45 @@ function buildDynamicResultAgentSteps(result: AgentRunResult, sampleVideo: Uploa
     {
       id: "frames",
       title: "抽取关键帧",
-      detail: frameCount > 0 ? `已抽取 ${frameCount} 张关键帧进入模型分析。` : "已接收视频元数据；没有拿到可展示的关键帧计数。",
+      detail: frameCount > 0 ? `抽了 ${frameCount} 张关键帧，用来判断画面结构、节奏和包装密度。` : "已拿到视频元数据，关键帧证据会继续补进分析。",
       meta: "frames",
       status: "done"
     },
     {
       id: "vision",
-      title: "模型解析爆款结构",
-      detail: visionTrace?.ok ? "模型已返回视频结构理解结果，并合并到样例拆解中。" : traceFailureText(visionTrace, "模型视觉理解没有返回可用结构。"),
+      title: "拆样例结构",
+      detail: visionTrace?.ok ? "模型拆出了样例的镜头节奏、字幕密度和结构槽位。" : agentReadableText(traceFailureText(visionTrace, "模型视觉理解还没给到可用结构。")),
       meta: "model",
       status: visionTrace?.ok ? "done" : "fallback"
     },
     {
       id: "plan",
-      title: "模型生成制作规范",
+      title: "生成制作方案",
       detail: planTrace?.ok
-        ? `模型已输出 ${result.generated.timeline.length} 个时间线片段和 ${result.generated.compositionPlan.slotMatches.length} 个槽位匹配。`
-        : traceFailureText(planTrace, "模型没有返回可执行的制作规范。"),
+        ? `我拿到 ${result.generated.timeline.length} 个时间线片段和 ${result.generated.compositionPlan.slotMatches.length} 个槽位匹配，开始组织成片。`
+        : agentReadableText(traceFailureText(planTrace, "模型还没给到可执行制作规范。")),
       meta: "plan",
       status: planTrace?.ok ? "done" : "fallback"
     },
     {
       id: "render",
-      title: rendered ? "服务端已写出 MP4" : "服务端未生成 MP4",
+      title: rendered ? "渲染成片草稿" : "成片草稿受阻",
       detail: rendered
         ? result.generated.demo.note
         : failed
-          ? "模型制作规范失败，本轮不会使用本地规则假生成视频。"
-          : "等待可渲染的模型制作规范。",
+          ? "制作规范还不够可执行，我会先补齐渲染需要的镜头和包装指令。"
+          : "我在整理可渲染的制作规范。",
       meta: rendered ? "mp4" : "blocked",
       status: rendered ? "done" : "fallback"
+    },
+    {
+      id: "benchmark",
+      title: score.accepted ? "基准评分收片" : "基准评分打回",
+      detail: score.accepted
+        ? `总分 ${score.totalScore}/100，我会保留这版并输出结果。`
+        : `总分 ${score.totalScore}/100，短板是${weakestDimension?.label ?? "结构完整度"}${benchmarkFix ? `；下一轮先改：${benchmarkFix}。` : "。"}`,
+      meta: score.accepted ? "pass" : score.grade,
+      status: score.accepted ? "done" : "fallback"
     }
   ];
 }
@@ -1836,16 +2261,179 @@ function traceFailureText(trace: AgentTraceItem | undefined, fallback: string) {
 }
 
 function agentResultSummary(result: AgentRunResult) {
-  if (result.generated.demo.status === "failed") {
-    return result.generated.demo.note || result.generated.compositionPlan.rationale[0] || "模型制作规范失败，本轮没有生成本地兜底视频。";
-  }
+  const score = result.benchmarkScore;
+  const weakest = weakestBenchmarkDimension(score);
   const duration = result.generated.timeline.at(-1)?.endSec ?? result.source.targetDurationSec;
+  const slotCount = result.generated.compositionPlan.slotMatches.length;
+  if (result.generated.demo.status === "failed") {
+    return `这轮先不交付：基准评分 ${score.totalScore}/100，成片规范没有撑住渲染。我会先补齐${hardFailureTitle(score.hardFailures[0]?.code)}和可执行 timeline。`;
+  }
+  if (score.accepted) {
+    return `这版可以交付：${duration} 秒、${slotCount} 个结构槽位，基准评分 ${score.totalScore}/100。我会输出当前成片和结构拆解。`;
+  }
+  const fix = compactAgentText(score.revisionBrief?.failedDimensions[0]?.instruction ?? score.topFixes[0]);
   const rationale = publicRationale(result.generated.compositionPlan.rationale[0]);
-  return `${rationale ?? "已完成结构迁移。"} 当前方案为 ${duration} 秒，可继续告诉我改开头、卖点顺序、字幕密度或节奏。`;
+  return `这版先不收：${duration} 秒草稿，基准评分 ${score.totalScore}/100，最弱的是${weakest?.label ?? "结构完整度"}。${rationale ? `${rationale} ` : ""}下一轮先改${fix ? `：${fix}` : "开头、卖点推进和节奏"}。`;
 }
 
 function firstBriefLine(value: string) {
   return (value.split("\n\n视频期望参数")[0] || value || "请根据上传视频生成短视频方案").trim();
+}
+
+function createHistoryEntry(result: AgentRunResult, prompt: string, videoName: string | undefined, turns: AgentTurn[]): HistoryEntry {
+  const createdAt = Date.now();
+  const historyResult = compactRunResultForHistory(result);
+  const visiblePrompt = compactAgentText(firstBriefLine(prompt));
+  const score = historyResult.benchmarkScore;
+  return {
+    id: `${createdAt}-${score.candidateId}`,
+    title: historyTitle(historyResult, visiblePrompt),
+    prompt: visiblePrompt,
+    createdAt,
+    score: score.totalScore,
+    accepted: score.accepted,
+    grade: score.grade,
+    videoName,
+    result: historyResult,
+    turns: turns.slice(-3).map((turn) => ({ id: turn.id, prompt: turn.prompt, status: "done", startedAt: turn.startedAt }))
+  };
+}
+
+function persistHistoryEntry(entry: HistoryEntry, entries: HistoryEntry[]) {
+  const next = [entry, ...entries.filter((item) => item.id !== entry.id)].slice(0, HISTORY_LIMIT);
+  writeHistoryEntries(next);
+  return next;
+}
+
+function readHistoryEntries(): HistoryEntry[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(HISTORY_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(isHistoryEntry)
+      .map((entry) => ({ ...entry, turns: Array.isArray(entry.turns) ? entry.turns : [] }))
+      .slice(0, HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function writeHistoryEntries(entries: HistoryEntry[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(entries.slice(0, HISTORY_LIMIT)));
+  } catch {
+    window.localStorage.removeItem(HISTORY_STORAGE_KEY);
+  }
+}
+
+function isHistoryEntry(value: unknown): value is HistoryEntry {
+  if (!value || typeof value !== "object") return false;
+  const entry = value as Partial<HistoryEntry>;
+  return (
+    typeof entry.id === "string" &&
+    typeof entry.title === "string" &&
+    typeof entry.prompt === "string" &&
+    typeof entry.createdAt === "number" &&
+    typeof entry.score === "number" &&
+    typeof entry.accepted === "boolean" &&
+    Boolean(entry.result && typeof entry.result === "object" && "benchmarkScore" in entry.result)
+  );
+}
+
+function compactRunResultForHistory(result: AgentRunResult): AgentRunResult {
+  return {
+    ...result,
+    samples: result.samples.map((sample) => ({
+      ...sample,
+      video: {
+        ...sample.video,
+        previewFrameCount: sample.video.previewFrameCount ?? sample.video.previewFrameDataUrls?.length,
+        previewFrameDataUrls: undefined
+      }
+    })),
+    material: {
+      ...result.material,
+      video: {
+        ...result.material.video,
+        previewFrameCount: result.material.video.previewFrameCount ?? result.material.video.previewFrameDataUrls?.length,
+        previewFrameDataUrls: undefined
+      }
+    },
+    agentTrace: result.agentTrace?.map((trace) => ({
+      ...trace,
+      input: compactTracePayload(trace.input),
+      observation: compactTracePayload(trace.observation)
+    }))
+  };
+}
+
+function compactTracePayload(value: unknown, depth = 0): unknown {
+  if (depth > 4) return "[省略深层数据]";
+  if (typeof value === "string") {
+    if (value.startsWith("data:image/") || value.length > 900) return "[省略大字段]";
+    return value;
+  }
+  if (Array.isArray(value)) return value.slice(0, 12).map((item) => compactTracePayload(item, depth + 1));
+  if (value && typeof value === "object") {
+    const compacted: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) {
+      const lowerKey = key.toLowerCase();
+      compacted[key] =
+        lowerKey.includes("dataurl") || lowerKey.includes("frameimage") || lowerKey.includes("base64")
+          ? "[省略帧数据]"
+          : compactTracePayload(item, depth + 1);
+    }
+    return compacted;
+  }
+  return value;
+}
+
+function historyTurnFromEntry(entry: HistoryEntry): AgentTurn {
+  return {
+    id: entry.id,
+    prompt: entry.prompt,
+    status: "done",
+    startedAt: entry.createdAt,
+    result: entry.result
+  };
+}
+
+function historyTitle(result: AgentRunResult, prompt: string) {
+  const productName = result.source.productName.trim();
+  if (productName) return `${productName} 迁移方案`;
+  return prompt.length > 24 ? `${prompt.slice(0, 24)}…` : prompt;
+}
+
+function benchmarkGradeLabel(grade: RunResult["benchmarkScore"]["grade"]) {
+  const labels: Record<RunResult["benchmarkScore"]["grade"], string> = {
+    excellent: "优秀",
+    pass: "通过",
+    needs_iteration: "需迭代",
+    fail: "失败"
+  };
+  return labels[grade];
+}
+
+function formatHistoryTime(timestamp: number) {
+  try {
+    return new Intl.DateTimeFormat("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).format(new Date(timestamp));
+  } catch {
+    return "刚刚";
+  }
+}
+
+function historyDuration(result: AgentRunResult) {
+  const duration = result.generated.timeline.at(-1)?.endSec ?? result.source.targetDurationSec;
+  return Math.round(duration);
 }
 
 function delay(ms: number) {
@@ -1902,11 +2490,6 @@ function readResultTabFromUrl(): ResultTab {
 
 function isResultTab(value: string | null): value is ResultTab {
   return resultTabs.some((tab) => tab.value === value);
-}
-
-function selectedCreativeSkillNames(ids: CreativeReconstructionSkillId[]) {
-  const selected = new Set(ids);
-  return creativeReconstructionSkills.filter((skill) => selected.has(skill.id)).map((skill) => skill.name);
 }
 
 function splitSellingPoints(value: string) {

@@ -6,6 +6,7 @@ import express from "express";
 import multer from "multer";
 import { ZodError } from "zod";
 import { videoAnalyzerAdapter } from "@byteproject/adapters";
+import { createEmptyBenchmarkScore } from "@byteproject/core";
 import { knowledgeStore } from "@byteproject/knowledge";
 import type { RunResult, SourceInput, VideoMetadata } from "@byteproject/shared";
 import {
@@ -154,6 +155,7 @@ function getVideoOrMock(id: string | undefined, role: "sample" | "material"): Vi
 }
 
 function createAnalysisRequiredResult(): RunResult {
+  const benchmarkScore = createEmptyBenchmarkScore("analysis-required-plan", "等待上传视频和生成候选，暂不评分。");
   const source: SourceInput = {
     sampleVideoIds: [],
     materialVideoId: "",
@@ -205,7 +207,9 @@ function createAnalysisRequiredResult(): RunResult {
         status: "failed",
         note: "上传视频完成视觉结构分析后才会生成结果。"
       }
-    }
+    },
+    benchmarkScore,
+    iterations: []
   };
 }
 

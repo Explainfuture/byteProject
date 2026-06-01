@@ -1,10 +1,12 @@
 import { resolve } from "node:path";
 import { z } from "zod";
 import { modelCreativeAdapter, modelPlanComposerAdapter, modelVideoUnderstandingAdapter, remotionStoryboardAdapter } from "@byteproject/adapters";
-import { analyzeSampleVideo, createBriefDrivenTranscript, segmentLongVideo } from "@byteproject/core";
+import { analyzeSampleVideo, createBriefDrivenTranscript, scoreCandidate, segmentLongVideo } from "@byteproject/core";
 import { knowledgeStore } from "@byteproject/knowledge";
 import { inferCreativeSkillIds } from "@byteproject/shared";
 import type {
+  BenchmarkScore,
+  CandidateIteration,
   GeneratedPlan,
   KnowledgeEntry,
   MaterialSegment,
@@ -24,6 +26,7 @@ const FRAME_BUDGET = {
   maxFrames: 16,
   secondsPerFrame: 4
 } as const;
+const BENCHMARK_MAX_ITERATIONS = 3;
 
 const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "frameBudget" | "promptHint">> = [
   {
@@ -74,6 +77,8 @@ type AgentContext = {
   materialSegments?: MaterialSegment[];
   generated?: GeneratedPlan;
   sampleVision?: Awaited<ReturnType<typeof modelVideoUnderstandingAdapter.run>>;
+  benchmarkScore?: BenchmarkScore;
+  iterations?: CandidateIteration[];
 };
 
 type AgentRunResult = RunResult & {
@@ -149,7 +154,7 @@ export async function runStructureTransferAgent(input: {
       {
         role: "system",
         content:
-          "You are the orchestrator for a short-video structure-transfer agent. Use tools to inspect the uploaded video, analyze key frames from the sample, retrieve knowledge, evaluate available visual segments, compose the plan, ask the creative model to enhance the script/renderer prompt, and render preview. Transfer creative method, not source content. Do not answer from memory. Call tools until a preview has been rendered. Final answer must be short JSON with status and calledTools."
+          "You are the main orchestrator for a short-video structure-transfer agent. First inspect the uploaded video and user brief, then select the suitable creative SKU/tool path, analyze key frames, retrieve knowledge, evaluate available visual segments, compose the plan, enhance it, render or stitch the preview, and score the generated candidate with the benchmark. Transfer creative method, not source content. Do not answer from memory. Call tools until a preview has been rendered and benchmarked. Final answer must be short JSON with status and calledTools."
       },
       {
         role: "user",
@@ -162,12 +167,14 @@ export async function runStructureTransferAgent(input: {
           },
           requiredToolPath: [
             "inspect_uploaded_video",
+            "select_creative_sku_and_tools",
             "analyze_sample_video",
             "retrieve_structure_knowledge",
             "evaluate_uploaded_video_segments",
             "compose_video_plan",
             "enhance_creative_plan",
-            "render_preview"
+            "render_preview",
+            "score_candidate"
           ]
         })
       }
@@ -208,13 +215,14 @@ export async function runStructureTransferAgent(input: {
         }
       }
 
-      if (context.generated?.demo.status === "rendered") break;
+      if (context.generated?.demo.status === "rendered" && context.benchmarkScore) break;
     }
 
     if (!context.sample || !context.knowledge || !context.materialSegments || !context.generated) {
       return runFallbackPipeline(context, trace, "agent did not complete required tools");
     }
 
+    await ensureBenchmarkScore(context, trace);
     return buildRunResult(context, trace, "tool-calling");
   } catch (error) {
     return runFallbackPipeline(context, trace, error instanceof Error ? error.message : "agent failed");
@@ -236,6 +244,41 @@ const agentTools: AgentTool[] = [
     async execute(input, context) {
       const parsed = z.object({ role: z.enum(["sample", "material"]) }).parse(input);
       return publicVideo(parsed.role === "sample" ? context.sampleVideo : context.materialVideo);
+    }
+  },
+  {
+    name: "select_creative_sku_and_tools",
+    description: "Choose creative reconstruction SKUs and concrete tool path after a real upload and brief are available. Do not run before inspecting the uploaded video.",
+    parameters: {
+      type: "object",
+      properties: {
+        prompt: { type: "string" }
+      },
+      required: [],
+      additionalProperties: false
+    },
+    async execute(input, context) {
+      const parsed = z.object({ prompt: z.string().optional() }).parse(input);
+      const source = parsed.prompt ? { ...context.source, prompt: parsed.prompt } : context.source;
+      const creativeSkillIds = inferCreativeSkillIds(source);
+      context.source = { ...source, creativeSkillIds };
+      return {
+        model: process.env.ARK_ENDPOINT_ID || process.env.ARK_MODEL || "Doubao-Seed-2.0-lite-compatible",
+        creativeSkillIds,
+        toolPath: [
+          "analyze_sample_video",
+          "evaluate_uploaded_video_segments",
+          "compose_video_plan",
+          "render_preview",
+          "score_candidate"
+        ],
+        framePlan: {
+          strategy: "middle-budget",
+          minFrames: FRAME_BUDGET.minFrames,
+          maxFrames: FRAME_BUDGET.maxFrames,
+          secondsPerFrame: FRAME_BUDGET.secondsPerFrame
+        }
+      };
     }
   },
   {
@@ -390,6 +433,24 @@ const agentTools: AgentTool[] = [
       };
       return { demo: context.generated.demo };
     }
+  },
+  {
+    name: "score_candidate",
+    description: "Score the rendered candidate with the 100-point viral quality benchmark and return revisionBrief when score is below target.",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false
+    },
+    async execute(_input, context) {
+      await ensureBenchmarkScore(context);
+      return {
+        benchmarkScore: context.benchmarkScore,
+        accepted: context.benchmarkScore?.accepted,
+        topFixes: context.benchmarkScore?.topFixes
+      };
+    }
   }
 ];
 
@@ -402,6 +463,112 @@ function toolsForModel() {
       parameters: tool.parameters
     }
   }));
+}
+
+async function ensureBenchmarkScore(context: AgentContext, trace?: AgentTraceItem[]) {
+  if (!context.sample || !context.knowledge || !context.materialSegments || !context.generated) {
+    throw new Error("Cannot score incomplete agent context.");
+  }
+  if (context.benchmarkScore && context.iterations?.length) return;
+
+  const iterations: CandidateIteration[] = [];
+  const canAttemptRevision = canUseToolCallingModel();
+
+  for (let iterationIndex = 0; iterationIndex < BENCHMARK_MAX_ITERATIONS; iterationIndex += 1) {
+    const benchmarkScore = scoreCandidate({
+      candidateId: context.generated.id,
+      iterationIndex,
+      source: context.source,
+      sample: context.sample,
+      knowledge: context.knowledge,
+      materialSegments: context.materialSegments,
+      generated: context.generated,
+      usedVision: Boolean(context.sampleVision?.analysis?.slots?.length)
+    });
+    context.benchmarkScore = benchmarkScore;
+    iterations.push({
+      candidateId: context.generated.id,
+      iterationIndex,
+      compositionPlan: context.generated.compositionPlan,
+      timeline: context.generated.timeline,
+      benchmarkScore
+    });
+
+    if (trace) {
+      trace.push({
+        tool: "benchmark_evaluator",
+        ok: benchmarkScore.accepted,
+        input: { candidateId: context.generated.id, iterationIndex },
+        observation: {
+          totalScore: benchmarkScore.totalScore,
+          grade: benchmarkScore.grade,
+          accepted: benchmarkScore.accepted,
+          hardFailures: benchmarkScore.hardFailures.map((failure) => failure.code),
+          topFixes: benchmarkScore.topFixes
+        }
+      });
+    }
+
+    if (benchmarkScore.accepted || benchmarkScore.hardFailures.length || iterationIndex >= BENCHMARK_MAX_ITERATIONS - 1) break;
+    if (!benchmarkScore.revisionBrief || !canAttemptRevision) break;
+
+    const beforePlanId = context.generated.id;
+    const modelResult = await modelCreativeAdapter.run({
+      source: {
+        ...context.source,
+        prompt: `${context.source.prompt}\n\nBenchmark revision brief:\n${JSON.stringify(benchmarkScore.revisionBrief)}`
+      },
+      sample: context.sample,
+      knowledge: context.knowledge,
+      materialSegments: context.materialSegments,
+      plan: context.generated
+    });
+
+    if (!modelResult.enhancement) {
+      trace?.push({
+        tool: "iteration_orchestrator",
+        ok: false,
+        input: { candidateId: beforePlanId, iterationIndex },
+        observation: {
+          status: "stopped",
+          reason: modelResult.error ? publicModelFailureReason(modelResult.error) : "model returned no benchmark revision"
+        }
+      });
+      break;
+    }
+
+    applyModelEnhancement(context.generated, modelResult.enhancement);
+    context.generated.id = `${beforePlanId}-iter-${iterationIndex + 1}`;
+    context.generated.compositionPlan.id = `${context.generated.compositionPlan.id}-iter-${iterationIndex + 1}`;
+    context.generated.compositionPlan.rationale = [
+      `Benchmark 触发自动迭代：${benchmarkScore.topFixes.join("；")}`,
+      ...context.generated.compositionPlan.rationale
+    ].slice(0, 5);
+    addAnalysisRationale(context);
+    const preview = await remotionStoryboardAdapter.run({
+      plan: context.generated,
+      outputDir: context.outputDir,
+      materialVideo: context.materialVideo,
+      materialSegments: context.materialSegments
+    });
+    context.generated.demo = {
+      status: "rendered",
+      url: preview.url,
+      note: preview.url.endsWith(".mp4") ? "已按 benchmark 自动迭代并重新生成 MP4 草稿。" : "已按 benchmark 自动迭代并重新生成 HTML 预览。"
+    };
+    trace?.push({
+      tool: "iteration_orchestrator",
+      ok: true,
+      input: { candidateId: beforePlanId, iterationIndex },
+      observation: {
+        status: "regenerated",
+        nextCandidateId: context.generated.id,
+        previousScore: benchmarkScore.totalScore
+      }
+    });
+  }
+
+  context.iterations = iterations;
 }
 
 async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[], reason: string): Promise<AgentRunResult> {
@@ -449,6 +616,7 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
         error: publicModelFailureReason(message)
       }
     });
+    await ensureBenchmarkScore(context, trace);
     return buildRunResult(context, trace, "fallback");
   }
   const modelResult = await modelCreativeAdapter.run({
@@ -497,6 +665,7 @@ async function runFallbackPipeline(context: AgentContext, trace: AgentTraceItem[
       timelineItems: context.generated.timeline.length
     }
   });
+  await ensureBenchmarkScore(context, trace);
   return buildRunResult(context, trace, "fallback");
 }
 
@@ -546,7 +715,7 @@ function createModelMissingSampleAnalysis(
   return {
     video,
     transcript: [],
-    summary: `等待模型从 ${video.fileName} 的抽帧里识别结构槽位；没有视觉分析结果时不生成预设结构。`,
+    summary: `正在从 ${video.fileName} 的抽帧里确认结构槽位；视觉证据回来后再生成迁移方案。`,
     slots: [],
     atoms: [],
     rhythmPattern: "未生成：需要模型视觉分析。",
@@ -764,7 +933,7 @@ function buildModelRequiredFailurePlan(source: SourceInput, reason: string): Gen
 }
 
 function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: AgentRunResult["agentMode"]): AgentRunResult {
-  if (!context.sample || !context.knowledge || !context.materialSegments || !context.generated) {
+  if (!context.sample || !context.knowledge || !context.materialSegments || !context.generated || !context.benchmarkScore) {
     throw new Error("Agent context is incomplete.");
   }
   return {
@@ -777,6 +946,8 @@ function buildRunResult(context: AgentContext, trace: AgentTraceItem[], mode: Ag
       segments: context.materialSegments
     },
     generated: context.generated,
+    benchmarkScore: context.benchmarkScore,
+    iterations: context.iterations ?? [],
     agentTrace: trace,
     agentMode: mode
   };
@@ -787,7 +958,7 @@ function addAnalysisRationale(context: AgentContext) {
   const frameCount = getFrameCount(context.sampleVideo, context.sampleVision);
   if (!context.sampleVision?.analysis) {
     context.generated.compositionPlan.rationale = [
-      `模型没有返回视频结构分析 slots；本轮不应输出预设方案。已抽取关键帧数量：${frameCount}。`,
+      `本轮已抽取 ${frameCount} 张关键帧，但模型还没给出结构 slots；我会先补齐视觉结构判断，再生成迁移方案。`,
       ...context.generated.compositionPlan.rationale
     ].slice(0, 5);
     return;
@@ -885,6 +1056,20 @@ function summarizeObservation(value: unknown): unknown {
         demo: generated.demo.status
       }
     };
+  }
+  if ("benchmarkScore" in value) {
+    const benchmarkScore = (value as { benchmarkScore?: BenchmarkScore }).benchmarkScore;
+    return benchmarkScore
+      ? {
+          benchmarkScore: {
+            totalScore: benchmarkScore.totalScore,
+            grade: benchmarkScore.grade,
+            accepted: benchmarkScore.accepted,
+            hardFailures: benchmarkScore.hardFailures.map((failure) => failure.code),
+            topFixes: benchmarkScore.topFixes
+          }
+        }
+      : value;
   }
   return value;
 }
