@@ -112,7 +112,10 @@ const generatedVideoCount = await page.locator(".generated-video-card video").co
 const naturalLanguageInputCount = await page.locator("#revisionPrompt").count();
 const videoAgentPanelCount = await page.locator(".video-agent-panel").count();
 const agentToolCallCount = await page.locator(".agent-tool-call").count();
+const agentToolHistoryCount = await page.locator(".agent-tool-history").count();
+const runningAgentToolCallCount = await page.locator(".agent-tool-call.running").count();
 const userAgentBubbleCount = await page.locator(".chat-row.user .agent-bubble").count();
+const userAvatarCount = await page.locator(".chat-row.user .user-avatar").count();
 const candidateIterationCardCount = await page.locator(".candidate-iteration-grid article").count();
 const candidateIterationVideoCount = await page.locator(".candidate-iteration-grid video").count();
 const candidateReasonCount = await page.locator(".candidate-reason").count();
@@ -122,9 +125,9 @@ const landscapeVideoFrameCount = adaptiveVideoClasses.filter((className) => clas
 if (demoTitleCount < 1 || generatedVideoCount < 1) {
   throw new Error(`成片预览不完整。titles=${demoTitleCount}, generatedVideos=${generatedVideoCount}`);
 }
-if (videoAgentPanelCount !== 1 || agentToolCallCount < 2 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
+if (videoAgentPanelCount !== 1 || agentToolCallCount !== 1 || agentToolHistoryCount !== 1 || runningAgentToolCallCount !== 0 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1 || userAvatarCount < 1) {
   throw new Error(
-    `智能体对话面板或预览区不完整。panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, generatedVideos=${generatedVideoCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
+    `智能体对话面板或预览区不完整。panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, history=${agentToolHistoryCount}, runningTools=${runningAgentToolCallCount}, generatedVideos=${generatedVideoCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}, userAvatars=${userAvatarCount}`
   );
 }
 if (candidateIterationCardCount < 1 || candidateIterationVideoCount < 1) {
@@ -217,7 +220,10 @@ const result = {
   naturalLanguageInputCount,
   videoAgentPanelCount,
   agentToolCallCount,
+  agentToolHistoryCount,
+  runningAgentToolCallCount,
   userAgentBubbleCount,
+  userAvatarCount,
   candidateIterationCardCount,
   candidateIterationVideoCount,
   candidateReasonCount,

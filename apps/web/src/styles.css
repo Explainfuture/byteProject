@@ -1255,6 +1255,7 @@ button:disabled {
 
 .chat-row.user {
   justify-content: flex-end;
+  align-items: flex-start;
 }
 
 .chat-row.ai {
@@ -1266,6 +1267,12 @@ button:disabled {
   height: 28px;
   flex: 0 0 auto;
   border-radius: 9px;
+}
+
+.user-avatar {
+  border-radius: 999px;
+  background: var(--panel-dark-2);
+  color: #fffdf9;
 }
 
 .agent-bubble {
@@ -1381,6 +1388,80 @@ button:disabled {
   line-height: 1.5;
 }
 
+.agent-tool-history {
+  margin-top: 9px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.agent-tool-history summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  list-style-position: outside;
+}
+
+.agent-tool-history ol {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-tool-history li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 7px;
+  border: 1px solid rgba(179, 117, 91, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 253, 249, 0.7);
+}
+
+.agent-tool-history li::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted-2);
+}
+
+.agent-tool-history li {
+  grid-template-columns: 6px minmax(0, 1fr) auto;
+}
+
+.agent-tool-history li.done::before {
+  background: #16a34a;
+}
+
+.agent-tool-history li.running::before {
+  background: var(--accent);
+}
+
+.agent-tool-history li.fallback::before {
+  background: var(--warning);
+}
+
+.agent-tool-history li span {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-tool-history li small {
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
 .agent-compose {
   display: grid;
   gap: 8px;
@@ -1399,18 +1480,25 @@ button:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 40px;
   gap: 8px;
+  align-items: center;
 }
 
 .agent-compose input {
   width: 100%;
+  height: 40px;
   min-height: 40px;
   padding: 0 11px;
+  line-height: 40px;
 }
 
 .agent-compose button {
   width: 40px;
+  height: 40px;
   min-height: 40px;
+  display: grid;
+  place-items: center;
   padding: 0;
+  line-height: 0;
 }
 
 @keyframes silver-sweep {
@@ -3207,6 +3295,12 @@ body {
 .agent-tool-icon {
   background: var(--surface-soft);
   color: var(--muted);
+}
+
+.user-avatar {
+  border-radius: 999px;
+  background: var(--panel-dark-2);
+  color: #fffdf9;
 }
 
 .agent-thread {

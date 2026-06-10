@@ -145,11 +145,8 @@ export function useWorkbenchController() {
     let streamedTurns = runningTurns;
     try {
       const data = await generateStructureTransferStream(payload, (event) => {
-        setAgentTurns((turns) => {
-          const next = applyAgentStreamEvent(turns, turnId, event);
-          streamedTurns = next;
-          return next;
-        });
+        streamedTurns = applyAgentStreamEvent(streamedTurns, turnId, event);
+        setAgentTurns(streamedTurns);
       });
 
       startTransition(() => {
@@ -247,7 +244,15 @@ function applyAgentStreamEvent(turns: AgentTurn[], turnId: string, event: AgentS
     if (turn.id !== turnId) return turn;
     const streamEvents = [...(turn.streamEvents ?? []), event];
     if (event.type === "run_result") {
-      return { ...turn, status: "done", result: event.result, streamEvents };
+      return {
+        ...turn,
+        status: "done",
+        result: event.result,
+        streamEvents,
+        steps: (turn.steps ?? []).map((step) => step.status === "running"
+          ? { ...step, status: "done" as const, detail: step.detail.replace(/^正在/, "已完成"), endedAt: event.at }
+          : step)
+      };
     }
     if (event.type === "run_error") {
       return {

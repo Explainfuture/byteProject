@@ -17,7 +17,8 @@ import {
   ScanSearch,
   Send,
   Sparkles,
-  Upload
+  Upload,
+  UserRound
 } from "lucide-react";
 import { Player } from "@remotion/player";
 import type { RunResult, SlotMatch, StructureSlot } from "@byteproject/shared";
@@ -907,7 +908,6 @@ function VideoAgentPanel(props: {
           const isLatestTurn = index === turns.length - 1;
           const turnResult = turn.result ?? (index === turns.length - 1 && turn.status === "done" ? props.result : undefined);
           const steps = turn.steps?.length ? turn.steps : turnResult ? buildDynamicResultAgentSteps(turnResult, props.sampleVideo) : [];
-          const visibleSteps = steps.slice(-8);
           const activeStep = currentAgentToolStep(steps);
           return (
             <div className="agent-turn" key={turn.id}>
@@ -915,6 +915,9 @@ function VideoAgentPanel(props: {
                 <div className="agent-bubble user-bubble">
                   <span>用户</span>
                   <p>{turn.prompt}</p>
+                </div>
+                <div className="agent-avatar user-avatar" aria-hidden="true">
+                  <UserRound size={15} />
                 </div>
               </div>
               <div className="chat-row ai">
@@ -926,11 +929,9 @@ function VideoAgentPanel(props: {
                   <p className="agent-dynamic-intro">{agentTurnIntro(turn, activeStep, turnResult)}</p>
                 </div>
               </div>
-              {isLatestTurn && visibleSteps.length ? (
+              {isLatestTurn && steps.length ? (
                 <div className="agent-tool-stack">
-                  {visibleSteps.map((step) => (
-                    <AgentToolCall key={step.id} step={step} />
-                  ))}
+                  <AgentToolCall step={activeStep} historySteps={steps} />
                 </div>
               ) : null}
             </div>
@@ -964,7 +965,7 @@ function VideoAgentPanel(props: {
   );
 }
 
-function AgentToolCall(props: { step: AgentToolStep }) {
+function AgentToolCall(props: { step: AgentToolStep; historySteps?: AgentToolStep[] }) {
   const icon =
     props.step.status === "running" ? (
       <Loader2 className="spin" size={15} aria-hidden="true" />
@@ -976,6 +977,9 @@ function AgentToolCall(props: { step: AgentToolStep }) {
       <ScanSearch size={15} aria-hidden="true" />
     );
 
+  const historySteps = props.historySteps ?? [];
+  const completedCount = historySteps.filter((step) => step.status === "done" || step.status === "fallback").length;
+
   return (
     <article className={`agent-tool-call ${props.step.status}`}>
       <div className="agent-tool-icon">{icon}</div>
@@ -985,6 +989,19 @@ function AgentToolCall(props: { step: AgentToolStep }) {
           {props.step.meta ? <span>{toolMetaLabel(props.step.meta)}</span> : null}
         </header>
         <p>{props.step.detail}</p>
+        {historySteps.length > 1 ? (
+          <details className="agent-tool-history">
+            <summary>查看本轮工具调用（{completedCount}/{historySteps.length}）</summary>
+            <ol>
+              {historySteps.map((step) => (
+                <li key={step.id} className={step.status}>
+                  <span>{step.tool ?? step.title}</span>
+                  <small>{toolMetaLabel(step.meta ?? step.status)}</small>
+                </li>
+              ))}
+            </ol>
+          </details>
+        ) : null}
       </div>
     </article>
   );
