@@ -28,10 +28,8 @@ import {
   agentReadableText,
   agentTurnIntro,
   benchmarkSummaryLabel,
-  buildDynamicLiveAgentSteps,
   buildDynamicResultAgentSteps,
   currentAgentToolStep,
-  currentLiveAgentStepIndex,
   firstBriefLine,
   hardFailureTitle,
   toolMetaLabel,
@@ -883,15 +881,6 @@ function VideoAgentPanel(props: {
   onSubmit: () => void;
   disabled: boolean;
 }) {
-  const hasRunningTurn = props.turns.some((turn) => turn.status === "running");
-  const [agentClock, setAgentClock] = useState(Date.now());
-
-  useEffect(() => {
-    if (!hasRunningTurn) return undefined;
-    const timer = window.setInterval(() => setAgentClock(Date.now()), 900);
-    return () => window.clearInterval(timer);
-  }, [hasRunningTurn]);
-
   const fallbackTurn: AgentTurn = {
     id: props.result.generated.id,
     prompt: firstBriefLine(props.result.source.prompt),
@@ -917,8 +906,8 @@ function VideoAgentPanel(props: {
         {turns.map((turn, index) => {
           const isLatestTurn = index === turns.length - 1;
           const turnResult = turn.result ?? (index === turns.length - 1 && turn.status === "done" ? props.result : undefined);
-          const liveIndex = currentLiveAgentStepIndex(turn.startedAt, agentClock);
-          const steps = turnResult ? buildDynamicResultAgentSteps(turnResult, props.sampleVideo) : buildDynamicLiveAgentSteps(liveIndex, props.sampleVideo);
+          const steps = turn.steps?.length ? turn.steps : turnResult ? buildDynamicResultAgentSteps(turnResult, props.sampleVideo) : [];
+          const visibleSteps = steps.slice(-8);
           const activeStep = currentAgentToolStep(steps);
           return (
             <div className="agent-turn" key={turn.id}>
@@ -937,9 +926,11 @@ function VideoAgentPanel(props: {
                   <p className="agent-dynamic-intro">{agentTurnIntro(turn, activeStep, turnResult)}</p>
                 </div>
               </div>
-              {isLatestTurn ? (
+              {isLatestTurn && visibleSteps.length ? (
                 <div className="agent-tool-stack">
-                  <AgentToolCall step={activeStep} />
+                  {visibleSteps.map((step) => (
+                    <AgentToolCall key={step.id} step={step} />
+                  ))}
                 </div>
               ) : null}
             </div>

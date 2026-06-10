@@ -504,3 +504,38 @@ export type RunResult = {
   benchmarkScore: BenchmarkScore;
   iterations: CandidateIteration[];
 };
+
+export type AgentToolUseEvent = {
+  type: "tool_use_start" | "tool_use_end" | "tool_use_error";
+  id: string;
+  tool: string;
+  at: number;
+  title?: string;
+  detail?: string;
+  meta?: string;
+  input?: unknown;
+  observation?: unknown;
+  ok?: boolean;
+};
+
+export type AgentRunResultEvent = {
+  type: "run_result";
+  at: number;
+  result: RunResult & {
+    agentTrace?: Array<{
+      tool: string;
+      ok: boolean;
+      input: unknown;
+      observation: unknown;
+    }>;
+    agentMode?: "tool-calling" | "fallback";
+  };
+};
+
+export type AgentRunErrorEvent = {
+  type: "run_error";
+  at: number;
+  error: string;
+};
+
+export type AgentStreamEvent = AgentToolUseEvent | AgentRunResultEvent | AgentRunErrorEvent;

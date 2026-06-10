@@ -1,5 +1,6 @@
 import type { modelVideoUnderstandingAdapter } from "@byteproject/adapters";
 import type {
+  AgentStreamEvent,
   BenchmarkScore,
   CandidateIteration,
   GeneratedPlan,
@@ -20,6 +21,8 @@ export type AgentTraceItem = {
   observation: unknown;
 };
 
+export type AgentEventSink = (event: AgentStreamEvent) => void;
+
 export type AgentContext = {
   source: SourceInput;
   sampleVideo: VideoMetadata;
@@ -32,6 +35,7 @@ export type AgentContext = {
   sampleVision?: VideoUnderstandingResult;
   benchmarkScore?: BenchmarkScore;
   iterations?: CandidateIteration[];
+  eventSink?: AgentEventSink;
 };
 
 export type CompleteAgentContext = AgentContext & {

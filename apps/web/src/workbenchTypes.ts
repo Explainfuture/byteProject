@@ -1,4 +1,4 @@
-import type { CreativeStrategy, RunResult, VideoStyleTrack } from "@byteproject/shared";
+import type { AgentStreamEvent, CreativeStrategy, RunResult, VideoStyleTrack } from "@byteproject/shared";
 
 export type UploadRole = "sample";
 
@@ -37,14 +37,20 @@ export type AgentTurn = {
   status: "running" | "done";
   startedAt: number;
   result?: AgentRunResult;
+  steps?: AgentToolStep[];
+  streamEvents?: AgentStreamEvent[];
 };
 
 export type AgentToolStep = {
   id: string;
+  toolUseId?: string;
+  tool?: string;
   title: string;
   detail: string;
   meta?: string;
   status: "pending" | "running" | "done" | "fallback";
+  startedAt?: number;
+  endedAt?: number;
 };
 
 export type HistoryEntry = {

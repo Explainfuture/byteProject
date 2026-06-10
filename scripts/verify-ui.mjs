@@ -64,7 +64,7 @@ await page.waitForFunction((buttonName) => {
   return buttons.some((button) => button.textContent?.includes(buttonName) && !button.disabled);
 }, generateButtonName);
 
-const responsePromise = page.waitForResponse((response) => response.url().includes("/api/generate"), {
+const responsePromise = page.waitForResponse((response) => response.url().includes("/api/generate/stream"), {
   timeout: 300_000
 });
 await page.getByRole("button", { name: generateButtonName }).click();
@@ -72,7 +72,7 @@ const generateResponse = await responsePromise;
 if (generateResponse.status() !== 200) {
   throw new Error(`Generate request failed with HTTP ${generateResponse.status()}`);
 }
-const generateJson = await generateResponse.json();
+const generateJson = parseRunResultFromSse(await generateResponse.text());
 const generatedJsonText = JSON.stringify(generateJson);
 const usesCustomBrief = generatedJsonText.includes("横屏演示装置") && generatedJsonText.includes("空间感强");
 const leakedDefaultMockTranscript = generatedJsonText.includes("出门总是忘记喝水吗") || generatedJsonText.includes("智能随行杯");
@@ -122,7 +122,7 @@ const landscapeVideoFrameCount = adaptiveVideoClasses.filter((className) => clas
 if (demoTitleCount < 1 || generatedVideoCount < 1) {
   throw new Error(`成片预览不完整。titles=${demoTitleCount}, generatedVideos=${generatedVideoCount}`);
 }
-if (videoAgentPanelCount !== 1 || agentToolCallCount !== 1 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
+if (videoAgentPanelCount !== 1 || agentToolCallCount < 2 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
   throw new Error(
     `智能体对话面板或预览区不完整。panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, generatedVideos=${generatedVideoCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
   );
@@ -245,6 +245,26 @@ async function assertBodyTextClean(page, stage) {
   if (match) {
     throw new Error(`页面存在疑似中文乱码。stage=${stage}, token=${match[0]}`);
   }
+}
+
+function parseRunResultFromSse(text) {
+  const events = text
+    .split(/\r?\n\r?\n/)
+    .map((frame) => frame
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n"))
+    .filter(Boolean)
+    .map((data) => JSON.parse(data));
+  const resultEvent = events.findLast((event) => event.type === "run_result");
+  if (!resultEvent?.result) throw new Error("Generate stream did not include run_result.");
+  const startCount = events.filter((event) => event.type === "tool_use_start").length;
+  const doneCount = events.filter((event) => event.type === "tool_use_end" || event.type === "tool_use_error").length;
+  if (startCount < 2 || doneCount < 2) {
+    throw new Error(`Generate stream did not include real tool events. starts=${startCount}, done=${doneCount}`);
+  }
+  return resultEvent.result;
 }
 
 async function createLandscapeVideoFile(page) {

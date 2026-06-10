@@ -40,26 +40,17 @@ export function currentAgentToolStep(steps: AgentToolStep[]): AgentToolStep {
       .reverse()
       .find((step) => step.status !== "pending") ?? {
       id: "idle",
-      title: "准备工具调用",
-      detail: "视频进来后开始分析。",
+      title: "等待真实工具事件",
+      detail: "后端发出 tool_use_start 后，这里会切到真实工具状态。",
       meta: "idle",
       status: "pending"
     }
   );
 }
 
-export function currentLiveAgentStepIndex(startedAt: number, now: number) {
-  const elapsed = Math.max(0, now - startedAt);
-  const thresholds = [0, 1200, 3200, 5600, 8200, 11000, 13200];
-  let index = 0;
-  for (const [candidate, threshold] of thresholds.entries()) {
-    if (elapsed >= threshold) index = candidate;
-  }
-  return Math.min(index, thresholds.length - 1);
-}
-
 export function agentTurnIntro(turn: AgentTurn, activeStep: AgentToolStep, result?: AgentRunResult) {
   if (result) return agentBenchmarkVerdict(result);
+  if (turn.status === "running" && activeStep.status === "pending") return "我正在等待后端真实工具事件。";
   if (turn.status === "running") return `我在处理「${activeStep.title}」：${activeStep.detail}`;
   return "我会沿着上一轮的结构判断继续改。";
 }
@@ -139,58 +130,6 @@ export function publicRationale(value?: string) {
     return "已完成在线创意增强，并根据样例结构生成新的短视频草案。";
   }
   return value.replace(/（model:\s*[^）]+）/gi, "").replace(/\(model:\s*[^)]+\)/gi, "").trim();
-}
-
-export function buildDynamicLiveAgentSteps(currentIndex: number, sampleVideo: UploadedVideo | null): AgentToolStep[] {
-  const liveDetails = [
-    {
-      id: "ingest",
-      title: "读视频与目标",
-      detail: sampleVideo ? `我先看 ${sampleVideo.name} 的画面、时长和目标，再决定怎么拆。` : "视频放进来后，我会先读画面证据。",
-      meta: "input"
-    },
-    {
-      id: "frames",
-      title: "抽取关键帧",
-      detail: "沿时间轴采样关键帧，用来判断开头、节奏、字幕密度和包装方式。",
-      meta: "frames"
-    },
-    {
-      id: "vision",
-      title: "让模型拆结构",
-      detail: "把关键帧、视频元数据和本轮指令交给模型，拆出可迁移的制作方法。",
-      meta: "model"
-    },
-    {
-      id: "plan",
-      title: "把结构改写成方案",
-      detail: "合成 slotMatches、timeline、分镜、字幕、包装和预期效果。",
-      meta: "plan"
-    },
-    {
-      id: "render",
-      title: "渲染成片草稿",
-      detail: "按制作规范截取、重排、拼接并写出 MP4 草稿。",
-      meta: "render"
-    },
-    {
-      id: "benchmark",
-      title: "抽帧基准评分",
-      detail: "成片草稿会被抽帧分析；我会根据分数决定收片还是返工。",
-      meta: "score"
-    },
-    {
-      id: "result",
-      title: "整理本轮判断",
-      detail: "把工具 trace、成片状态和 benchmark 短板合成下一步结论。",
-      meta: "result"
-    }
-  ];
-
-  return liveDetails.map((step, index) => ({
-    ...step,
-    status: index < currentIndex ? "done" : index === currentIndex ? "running" : "pending"
-  }));
 }
 
 export function buildDynamicResultAgentSteps(result: AgentRunResult, sampleVideo: UploadedVideo | null): AgentToolStep[] {

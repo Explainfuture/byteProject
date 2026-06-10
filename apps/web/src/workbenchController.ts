@@ -1,6 +1,7 @@
 import { useEffect, useState, useTransition } from "react";
+import type { AgentStreamEvent } from "@byteproject/shared";
 import type { SlotMatch, StructureSlot } from "@byteproject/shared";
-import { downloadResultJson, fetchDemoResult, generateStructureTransfer, uploadVideoFile } from "./apiClient";
+import { downloadResultJson, fetchDemoResult, generateStructureTransferStream, uploadVideoFile } from "./apiClient";
 import { agentResultSummary } from "./resultPresentationModel";
 import {
   buildGeneratePayload,
@@ -132,7 +133,7 @@ export function useWorkbenchController() {
     setStartValidationErrors({});
     const visiblePrompt = (extraInstruction?.trim() || form.prompt.trim() || "请根据上传视频生成短视频方案").trim();
     const turnId = `${Date.now()}`;
-    const nextTurn: AgentTurn = { id: turnId, prompt: visiblePrompt, status: "running", startedAt: Date.now() };
+    const nextTurn: AgentTurn = { id: turnId, prompt: visiblePrompt, status: "running", startedAt: Date.now(), steps: [], streamEvents: [] };
     const runningTurns = extraInstruction?.trim() ? [...agentTurns, nextTurn] : [nextTurn];
     const sourceVideoName = sampleVideo?.name;
     setAgentTurns(runningTurns);
@@ -141,17 +142,29 @@ export function useWorkbenchController() {
     if (!extraInstruction?.trim()) setActiveTab("demo");
 
     const payload = buildGeneratePayload(form, sampleVideo, extraInstruction);
-    const [data] = await Promise.all([generateStructureTransfer(payload), delay(1800)]);
+    let streamedTurns = runningTurns;
+    try {
+      const data = await generateStructureTransferStream(payload, (event) => {
+        setAgentTurns((turns) => {
+          const next = applyAgentStreamEvent(turns, turnId, event);
+          streamedTurns = next;
+          return next;
+        });
+      });
 
-    startTransition(() => {
-      const completedTurns = runningTurns.map((turn) => (turn.id === turnId ? { ...turn, status: "done" as const, result: data } : turn));
-      setResult(data);
-      setAgentTurns(completedTurns);
-      setHistoryEntries((entries) => persistHistoryEntry(createHistoryEntry(data, visiblePrompt, sourceVideoName, completedTurns, agentResultSummary(data)), entries));
-      setScreen("result");
+      startTransition(() => {
+        const completedTurns = markTurnDoneWithResult(streamedTurns.length ? streamedTurns : runningTurns, turnId, data);
+        setResult(data);
+        setAgentTurns(completedTurns);
+        setHistoryEntries((entries) => persistHistoryEntry(createHistoryEntry(data, visiblePrompt, sourceVideoName, completedTurns, agentResultSummary(data)), entries));
+        setScreen("result");
+        setIsGenerating(false);
+        setRevisionPrompt("");
+      });
+    } catch (error) {
+      setAgentTurns((turns) => applyAgentStreamError(turns, turnId, error instanceof Error ? error.message : "生成失败"));
       setIsGenerating(false);
-      setRevisionPrompt("");
-    });
+    }
   }
 
   function generateFromStart() {
@@ -229,6 +242,95 @@ export function useWorkbenchController() {
   };
 }
 
+function applyAgentStreamEvent(turns: AgentTurn[], turnId: string, event: AgentStreamEvent): AgentTurn[] {
+  return turns.map((turn) => {
+    if (turn.id !== turnId) return turn;
+    const streamEvents = [...(turn.streamEvents ?? []), event];
+    if (event.type === "run_result") {
+      return { ...turn, status: "done", result: event.result, streamEvents };
+    }
+    if (event.type === "run_error") {
+      return {
+        ...turn,
+        streamEvents,
+        steps: [
+          ...(turn.steps ?? []),
+          {
+            id: `error-${event.at}`,
+            title: "生成失败",
+            detail: event.error,
+            meta: "fail",
+            status: "fallback" as const,
+            startedAt: event.at,
+            endedAt: event.at
+          }
+        ]
+      };
+    }
+    const currentSteps = turn.steps ?? [];
+    if (event.type === "tool_use_start") {
+      return {
+        ...turn,
+        streamEvents,
+        steps: [
+          ...currentSteps,
+          {
+            id: event.id,
+            toolUseId: event.id,
+            tool: event.tool,
+            title: event.title ?? event.tool,
+            detail: event.detail ?? `正在执行 ${event.tool}`,
+            meta: event.meta,
+            status: "running" as const,
+            startedAt: event.at
+          }
+        ]
+      };
+    }
+    return {
+      ...turn,
+      streamEvents,
+      steps: currentSteps.map((step) => (
+        step.toolUseId === event.id
+          ? {
+              ...step,
+              detail: event.detail ?? step.detail,
+              meta: event.meta ?? step.meta,
+              status: event.type === "tool_use_end" ? "done" as const : "fallback" as const,
+              endedAt: event.at
+            }
+          : step
+      ))
+    };
+  });
+}
+
+function applyAgentStreamError(turns: AgentTurn[], turnId: string, message: string): AgentTurn[] {
+  return turns.map((turn) => (
+    turn.id === turnId
+      ? {
+          ...turn,
+          status: "done",
+          steps: [
+            ...(turn.steps ?? []).map((step) => step.status === "running" ? { ...step, status: "fallback" as const, detail: "工具执行被中断。" } : step),
+            {
+              id: `stream-error-${Date.now()}`,
+              title: "生成失败",
+              detail: message,
+              meta: "fail",
+              status: "fallback" as const,
+              endedAt: Date.now()
+            }
+          ]
+        }
+      : turn
+  ));
+}
+
+function markTurnDoneWithResult(turns: AgentTurn[], turnId: string, data: AgentRunResult): AgentTurn[] {
+  return turns.map((turn) => (turn.id === turnId ? { ...turn, status: "done" as const, result: data } : turn));
+}
+
 export function readResultTabFromUrl(): ResultTab {
   const value = new URLSearchParams(window.location.search).get("tab");
   return isResultTab(value) ? value : defaultResultTab;
@@ -236,8 +338,4 @@ export function readResultTabFromUrl(): ResultTab {
 
 function isResultTab(value: string | null): value is ResultTab {
   return value === "demo" || value === "benchmark" || value === "structure" || value === "gaps" || value === "timeline" || value === "packaging" || value === "versions";
-}
-
-function delay(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

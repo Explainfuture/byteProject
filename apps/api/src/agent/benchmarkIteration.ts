@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scoreCandidate } from "@byteproject/core";
 import type { BenchmarkScore, CandidateIteration, CandidateRemotionArtifact, GeneratedPlan, RemotionCompositionDsl, SourceInput, VisualBenchmarkReport } from "@byteproject/shared";
+import { startToolUse } from "./events";
 import { BENCHMARK_MAX_ITERATIONS } from "./constants";
 import { addAnalysisRationale, applyModelEnhancement } from "./planning";
 import { publicModelFailureReason } from "./publicContracts";
@@ -16,7 +17,15 @@ export async function ensureBenchmarkScore(context: AgentContext, trace?: AgentT
   }
   if (context.benchmarkScore && context.iterations?.length) return;
 
-  if (await runSeedanceCandidateLoop(context, trace, runtime)) return;
+  const benchmarkEvent = startToolUse(context, "score_candidate", { planId: context.generated.id });
+  try {
+  if (await runSeedanceCandidateLoop(context, trace, runtime)) {
+    benchmarkEvent.end({
+      benchmarkScore: context.benchmarkScore,
+      iterations: context.iterations?.length ?? 0
+    });
+    return;
+  }
 
   const iterations: CandidateIteration[] = [];
   const canAttemptModelRevision = runtime.canUseToolCallingModel();
@@ -112,6 +121,14 @@ export async function ensureBenchmarkScore(context: AgentContext, trace?: AgentT
   }
 
   context.iterations = iterations;
+  benchmarkEvent.end({
+    benchmarkScore: context.benchmarkScore,
+    iterations: context.iterations.length
+  });
+  } catch (error) {
+    benchmarkEvent.error({ error: publicModelFailureReason(error instanceof Error ? error.message : "Benchmark scoring failed.") });
+    throw error;
+  }
 }
 
 async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTraceItem[] | undefined, runtime: AgentRuntime) {
@@ -129,6 +146,12 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
 
   for (let iterationIndex = 0; iterationIndex < BENCHMARK_MAX_ITERATIONS; iterationIndex += 1) {
     const candidateId = `${basePlan.id}-candidate-${iterationIndex}`;
+    const coderEvent = startToolUse(context, "seedance_remotion_coder", {
+      candidateId,
+      iterationIndex,
+      rewriteBrief,
+      previousCandidateId
+    });
     const coderResult = await runtime.remotionCoder.run({
       source: context.source,
       sample: context.sample,
@@ -138,9 +161,13 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
       iterationIndex,
       rewriteBrief,
       previousCandidateId
+    }).catch((error) => {
+      coderEvent.error({ error: publicModelFailureReason(error instanceof Error ? error.message : "Seedance Remotion Coder failed.") });
+      throw error;
     });
 
     if (!coderResult.dsl || !coderResult.remotionCode) {
+      coderEvent.error({ provider: coderResult.provider, error: publicModelFailureReason(coderResult.error ?? "Seedance Remotion Coder did not return code.") });
       trace?.push({
         tool: "seedance_remotion_coder",
         ok: false,
@@ -149,6 +176,7 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
       });
       return false;
     }
+    coderEvent.end({ provider: coderResult.provider, model: coderResult.model, candidateId });
 
     const codeHash = hashText(coderResult.remotionCode);
     const structuralSignature = remotionStructuralSignature(coderResult.dsl);
@@ -180,6 +208,7 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
       dsl: coderResult.dsl,
       remotionCode: coderResult.remotionCode
     });
+    const renderEvent = startToolUse(context, "render_preview", { candidateId, iterationIndex });
     const preview = await runtime.renderer.run({
       plan: candidatePlan,
       outputDir: context.outputDir,
@@ -187,13 +216,22 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
       materialSegments: context.materialSegments,
       remotionDsl: coderResult.dsl,
       remotionCode: coderResult.remotionCode
+    }).catch((error) => {
+      renderEvent.error({ error: publicModelFailureReason(error instanceof Error ? error.message : "Renderer failed.") });
+      throw error;
     });
+    renderEvent.end({ url: preview.url, path: preview.path });
     candidatePlan.demo = {
       status: "rendered",
       url: preview.url,
       note: preview.url.endsWith(".mp4") ? "已由 Seedance Remotion Coder 生成代码并渲染候选视频。" : "已生成候选预览。"
     };
 
+    const judgeEvent = startToolUse(context, "visual_benchmark_judge", {
+      candidateId,
+      iterationIndex,
+      renderedVideo: preview.url
+    });
     const judge = await runtime.visualJudge.run({
       source: context.source,
       sample: context.sample,
@@ -207,9 +245,13 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
       remotionCode: coderResult.remotionCode,
       previousScore: best?.score,
       rewriteBrief
+    }).catch((error) => {
+      judgeEvent.error({ error: publicModelFailureReason(error instanceof Error ? error.message : "Visual Benchmark Judge failed.") });
+      throw error;
     });
 
     if (!judge.score) {
+      judgeEvent.error({ provider: judge.provider, error: publicModelFailureReason(judge.error ?? "Visual Benchmark Judge did not return a score.") });
       trace?.push({
         tool: "visual_benchmark_judge",
         ok: false,
@@ -229,6 +271,13 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
       reasons: judge.reasons ?? normalizedScore.topFixes,
       nextRewriteBrief: judge.nextRewriteBrief ?? normalizedScore.revisionBrief?.failedDimensions.map((dimension) => dimension.instruction).join("\n")
     };
+    judgeEvent.end({
+      provider: judge.provider,
+      model: judge.model,
+      score: normalizedScore.totalScore,
+      accepted: normalizedScore.accepted,
+      hardFailures: normalizedScore.hardFailures.map((failure) => failure.code)
+    });
     const remotionArtifact: CandidateRemotionArtifact = {
       provider: coderResult.provider,
       model: coderResult.model,
@@ -255,6 +304,14 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
       rewriteBrief
     });
     iterations.push(snapshot);
+
+    const iterationEvent = startToolUse(context, "seedance_candidate_iteration", { candidateId, iterationIndex });
+    iterationEvent.end({
+      score: normalizedScore.totalScore,
+      accepted: normalizedScore.accepted,
+      outputUrl: preview.url,
+      codeHash
+    });
 
     trace?.push({
       tool: "seedance_candidate_iteration",
@@ -301,12 +358,17 @@ async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTrace
 
 export async function renderCurrentCandidate(context: AgentContext, note: string, runtime: AgentRuntime = defaultAgentRuntime) {
   if (!context.generated) throw new Error("Cannot render without a generated plan.");
+  const renderEvent = startToolUse(context, "render_preview", { planId: context.generated.id });
   const preview = await runtime.renderer.run({
     plan: context.generated,
     outputDir: context.outputDir,
     materialVideo: context.materialVideo,
     materialSegments: context.materialSegments
+  }).catch((error) => {
+    renderEvent.error({ error: publicModelFailureReason(error instanceof Error ? error.message : "Renderer failed.") });
+    throw error;
   });
+  renderEvent.end({ url: preview.url, path: preview.path });
   context.generated.demo = {
     status: "rendered",
     url: preview.url,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { AgentRuntime } from "./runtime";
 import { normalizeSourceInput, runStructureTransferAgent } from "../structureAgent";
-import type { KnowledgeEntry, MaterialSegment, RemotionCompositionDsl, SourceInput, StructureSlot, VideoMetadata } from "@byteproject/shared";
+import type { AgentStreamEvent, KnowledgeEntry, MaterialSegment, RemotionCompositionDsl, SourceInput, StructureSlot, VideoMetadata } from "@byteproject/shared";
 
 const testSlots: StructureSlot[] = [
   {
@@ -80,6 +80,7 @@ describe("agent architecture seams", () => {
   it("iterates persisted Seedance Remotion candidates until visual benchmark passes", async () => {
     const addedKnowledge: KnowledgeEntry[] = [];
     const renderedPlanIds: string[] = [];
+    const streamEvents: AgentStreamEvent[] = [];
     const runtime = createVisualIterationRuntime(addedKnowledge, renderedPlanIds);
     const source = normalizeSourceInput({
       prompt: "Turn this launch walkthrough into a high-energy product video",
@@ -96,7 +97,8 @@ describe("agent architecture seams", () => {
         materialVideo: createVideo("seedance-material", "material"),
         outputDir: "data/outputs"
       },
-      runtime
+      runtime,
+      (event) => streamEvents.push(event)
     );
 
     expect(result.iterations).toHaveLength(2);
@@ -117,6 +119,11 @@ describe("agent architecture seams", () => {
     expect(result.iterations[0].remotionArtifact?.outputUrl).toBe("/outputs/seedance-0.mp4");
     expect(result.iterations[1].remotionArtifact?.frameUrls).toEqual(expect.arrayContaining(["/outputs/seedance-1-frame-001.jpg"]));
     expect(renderedPlanIds).toEqual(expect.arrayContaining([result.iterations[0].candidateId, result.iterations[1].candidateId]));
+    expect(streamEvents.map((event) => event.type)).toEqual(expect.arrayContaining(["tool_use_start", "tool_use_end"]));
+    expect(streamEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "tool_use_start", tool: "seedance_remotion_coder" }),
+      expect.objectContaining({ type: "tool_use_end", tool: "visual_benchmark_judge" })
+    ]));
   });
 
   it("hard-fails consecutive Seedance candidates that only change copy", async () => {

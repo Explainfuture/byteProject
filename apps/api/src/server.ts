@@ -8,7 +8,7 @@ import { ZodError } from "zod";
 import { videoAnalyzerAdapter } from "@byteproject/adapters";
 import { createEmptyBenchmarkScore } from "@byteproject/core";
 import { frameSampleCountForDuration, normalizeFrameBudget } from "@byteproject/shared";
-import type { RunResult, SourceInput, VideoMetadata } from "@byteproject/shared";
+import type { AgentStreamEvent, RunResult, SourceInput, VideoMetadata } from "@byteproject/shared";
 import { defaultAgentRuntime } from "./agent/runtime";
 import {
   analyzeSampleWithVision,
@@ -102,12 +102,7 @@ app.post("/api/analyze/sample", async (request, response, next) => {
 
 app.post("/api/generate", async (request, response, next) => {
   try {
-    const source = normalizeSourceInput(request.body);
-    const sampleVideo = getVideoOrMock(source.sampleVideoIds[0], "sample");
-    const materialVideo =
-      source.materialVideoId === source.sampleVideoIds[0]
-        ? { ...sampleVideo, role: "material" as const }
-        : getVideoOrMock(source.materialVideoId, "material");
+    const { source, sampleVideo, materialVideo } = resolveGenerateInput(request.body);
     const result = await runStructureTransferAgent({
       source,
       sampleVideo,
@@ -117,6 +112,44 @@ app.post("/api/generate", async (request, response, next) => {
     response.json(result);
   } catch (error) {
     next(error);
+  }
+});
+
+app.post("/api/generate/stream", async (request, response) => {
+  response.status(200);
+  response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  response.setHeader("Cache-Control", "no-cache, no-transform");
+  response.setHeader("Connection", "keep-alive");
+  response.flushHeaders?.();
+
+  let closed = false;
+  response.on("close", () => {
+    closed = true;
+  });
+
+  const send = (event: AgentStreamEvent) => {
+    if (closed) return;
+    response.write(`event: ${event.type}\n`);
+    response.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+
+  try {
+    const { source, sampleVideo, materialVideo } = resolveGenerateInput(request.body);
+    const result = await runStructureTransferAgent({
+      source,
+      sampleVideo,
+      materialVideo,
+      outputDir
+    }, defaultAgentRuntime, send);
+    send({ type: "run_result", at: Date.now(), result });
+  } catch (error) {
+    send({
+      type: "run_error",
+      at: Date.now(),
+      error: error instanceof Error ? error.message : "Streaming generation failed."
+    });
+  } finally {
+    if (!closed) response.end();
   }
 });
 
@@ -150,6 +183,16 @@ function getVideoOrMock(id: string | undefined, role: "sample" | "material"): Vi
     fps: 30,
     sizeBytes: 0
   };
+}
+
+function resolveGenerateInput(body: unknown) {
+  const source = normalizeSourceInput(body);
+  const sampleVideo = getVideoOrMock(source.sampleVideoIds[0], "sample");
+  const materialVideo =
+    source.materialVideoId === source.sampleVideoIds[0]
+      ? { ...sampleVideo, role: "material" as const }
+      : getVideoOrMock(source.materialVideoId, "material");
+  return { source, sampleVideo, materialVideo };
 }
 
 function createAnalysisRequiredResult(): RunResult {
