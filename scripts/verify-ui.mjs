@@ -23,12 +23,21 @@ const studioWorkspaceCount = await page.locator(".studio-workspace").count();
 const startAgentPanelCount = await page.locator(".start-agent-panel").count();
 const agentReadyCount = await page.locator(".agent-ready-state").count();
 const startRunningToolCount = await page.locator(".start-agent-flow .agent-tool-call.running").count();
+const disabledShellButtonCount = await page.locator(".workbench-sidenav button:disabled, .workbench-topnav button:disabled").count();
+const retiredShellTextCount = await page.getByText(/帮助|设置|升级方案|素材库|待接入|文档/).count();
+const sideNavFooterCount = await page.locator(".sidenav-footer").count();
 const startButtonInitiallyDisabled = await page.getByRole("button", { name: generateButtonName }).isDisabled();
 if (workbenchShellCount !== 1 || sideNavCount !== 1 || topNavCount !== 1 || agentReadyCount !== 1 || startRunningToolCount !== 0) {
   throw new Error(
     `Stitch 工作台结构不完整。shell=${workbenchShellCount}, side=${sideNavCount}, top=${topNavCount}, ready=${agentReadyCount}, running=${startRunningToolCount}`
   );
 }
+if (disabledShellButtonCount !== 0 || retiredShellTextCount !== 0 || sideNavFooterCount !== 0) {
+  throw new Error(
+    `工作台仍有未接入入口。disabledShellButtons=${disabledShellButtonCount}, retiredText=${retiredShellTextCount}, footer=${sideNavFooterCount}`
+  );
+}
+await assertBodyTextClean(page, "start");
 const startDesktopScreenshotPath = resolve("data/tmp/ui-start-1440.png");
 const startMobileScreenshotPath = resolve("data/tmp/ui-start-mobile.png");
 await page.screenshot({ path: startDesktopScreenshotPath, fullPage: true });
@@ -82,7 +91,13 @@ const benchmarkScore = generateJson?.benchmarkScore?.totalScore;
 if (typeof benchmarkScore !== "number" || !Array.isArray(generateJson?.benchmarkScore?.dimensionScores) || generateJson.benchmarkScore.dimensionScores.length !== 7) {
   throw new Error("Generated result is missing a complete benchmarkScore.");
 }
+const iterationCount = Array.isArray(generateJson?.iterations) ? generateJson.iterations.length : 0;
+const iterationsWithDemo = Array.isArray(generateJson?.iterations) ? generateJson.iterations.filter((iteration) => iteration?.demo?.url).length : 0;
+if (iterationCount < 1 || iterationsWithDemo < 1) {
+  throw new Error(`Generated result is missing per-iteration video output. iterations=${iterationCount}, demos=${iterationsWithDemo}`);
+}
 await page.locator(".result-shell").waitFor({ state: "visible" });
+await assertBodyTextClean(page, "result");
 
 const demoTitleCount = await page.getByRole("heading", { name: /已生成 .* 秒结构化预览/ }).count();
 const fakeRemotionPlayerCount = await page.locator(".fake-remotion-player").count();
@@ -91,12 +106,17 @@ const naturalLanguageInputCount = await page.locator("#revisionPrompt").count();
 const videoAgentPanelCount = await page.locator(".video-agent-panel").count();
 const agentToolCallCount = await page.locator(".agent-tool-call").count();
 const userAgentBubbleCount = await page.locator(".chat-row.user .agent-bubble").count();
+const candidateIterationCardCount = await page.locator(".candidate-iteration-grid article").count();
+const candidateIterationVideoCount = await page.locator(".candidate-iteration-grid video").count();
 const adaptiveVideoClasses = await page.locator(".adaptive-video-frame").evaluateAll((nodes) => nodes.map((node) => node.className));
 const landscapeVideoFrameCount = adaptiveVideoClasses.filter((className) => className.includes("landscape")).length;
-if (videoAgentPanelCount !== 1 || agentToolCallCount < 4 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
+if (videoAgentPanelCount !== 1 || agentToolCallCount !== 1 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
   throw new Error(
     `智能体对话面板或预览区不完整。panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, previews=${fakeRemotionPlayerCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
   );
+}
+if (candidateIterationCardCount < 1 || candidateIterationVideoCount < 1) {
+  throw new Error(`每轮生成视频没有展示。cards=${candidateIterationCardCount}, videos=${candidateIterationVideoCount}`);
 }
 
 await page.locator(".result-nav button", { hasText: "评分" }).click();
@@ -109,7 +129,10 @@ await page.locator(".result-nav button", { hasText: "缺口" }).click();
 const diagnosisCardCount = await page.locator(".diagnosis-card").count();
 
 await page.locator(".result-nav button", { hasText: "时间线" }).click();
-const timelineTrackCount = await page.locator(".light-track").count();
+const timelineSegmentCount = await page.locator(".timeline-segment").count();
+const timelineDeliveryCardCount = await page.locator(".timeline-delivery-card").count();
+const timelineScreenshotPath = resolve("data/tmp/ui-timeline.png");
+await page.screenshot({ path: timelineScreenshotPath, fullPage: true });
 
 await page.locator(".result-nav button", { hasText: "成片" }).click();
 const screenshotPath = resolve("data/tmp/ui-verification.png");
@@ -117,6 +140,7 @@ await page.screenshot({ path: screenshotPath, fullPage: true });
 
 await page.getByRole("button", { name: "历史", exact: true }).click();
 await page.locator(".history-shell").waitFor({ state: "visible" });
+await assertBodyTextClean(page, "history");
 const historyCardCount = await page.locator(".history-card").count();
 const activeSideLabelsOnHistory = await page.locator(".sidenav-links button.active span").allInnerTexts();
 const persistedHistoryCount = await page.evaluate(() => {
@@ -150,6 +174,9 @@ const result = {
   startAgentPanelCount,
   agentReadyCount,
   startRunningToolCount,
+  disabledShellButtonCount,
+  retiredShellTextCount,
+  sideNavFooterCount,
   startButtonInitiallyDisabled,
   startDesktopScreenshotPath,
   startMobileScreenshotPath,
@@ -162,6 +189,8 @@ const result = {
   agentMode,
   agentTraceCount,
   benchmarkScore,
+  iterationCount,
+  iterationsWithDemo,
   benchmarkDimensionCount,
   demoTitleCount,
   fakeRemotionPlayerCount,
@@ -170,9 +199,13 @@ const result = {
   videoAgentPanelCount,
   agentToolCallCount,
   userAgentBubbleCount,
+  candidateIterationCardCount,
+  candidateIterationVideoCount,
   mappingRowCount,
   diagnosisCardCount,
-  timelineTrackCount,
+  timelineSegmentCount,
+  timelineDeliveryCardCount,
+  timelineScreenshotPath,
   screenshotPath,
   historyCardCount,
   persistedHistoryCount,
@@ -183,6 +216,14 @@ const result = {
 
 await writeFile(resolve("data/tmp/ui-verification.json"), JSON.stringify(result, null, 2), "utf8");
 console.log(JSON.stringify(result));
+
+async function assertBodyTextClean(page, stage) {
+  const text = await page.locator("body").innerText();
+  const match = text.match(/�|锟|鍙|鎴|绔|妯|棰|瑙|鐢|淇|瀛|骞|浣|搴|杈|鍖|缂|鐖|鐨|杩|佺|榛|鈥/);
+  if (match) {
+    throw new Error(`页面存在疑似中文乱码。stage=${stage}, token=${match[0]}`);
+  }
+}
 
 async function createLandscapeVideoFile(page) {
   const base64 = await page.evaluate(async () => {

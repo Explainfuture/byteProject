@@ -1,4 +1,3 @@
-import { knowledgeStore, seedKnowledge } from "@byteproject/knowledge";
 import { creativeReconstructionSkills, inferCreativeSkillIds } from "@byteproject/shared";
 import type {
   AssetType,
@@ -136,6 +135,8 @@ export function createMockTranscript(productName = "智能随行杯"): Transcrip
 
 type AnalysisOptions = {
   persist?: boolean;
+  baseKnowledge?: KnowledgeEntry;
+  onKnowledgeEntry?: (entry: KnowledgeEntry) => void;
 };
 
 type BriefDrivenTranscriptSource = Pick<SourceInput, "prompt" | "productName" | "sellingPoints" | "targetAudience" | "tone" | "targetDurationSec">;
@@ -162,7 +163,7 @@ export function createBriefDrivenTranscript(source: Partial<BriefDrivenTranscrip
 }
 
 export function analyzeSampleVideo(video: VideoMetadata, transcript = createMockTranscript(), options: AnalysisOptions = {}): SampleAnalysis {
-  const seed = seedKnowledge.find((entry) => entry.vertical === "marketing") ?? seedKnowledge[0];
+  const seed = requireKnowledgeEntry(options.baseKnowledge, "analyzeSampleVideo");
   const atoms = deriveAtomsFromTranscript(transcript, seed.atoms);
   const slots = seed.structureSlots.map((slot, index) => ({
     ...slot,
@@ -181,7 +182,7 @@ export function analyzeSampleVideo(video: VideoMetadata, transcript = createMock
     packagingPattern: ["标题条开场", "卖点卡片补足信息", "CTA 按钮式收尾"],
     applicableWhen: ["商品推广", "素材需要重构", "目标 10-20 秒短视频"]
   };
-  if (options.persist !== false) knowledgeStore.add(entry);
+  if (options.persist !== false) options.onKnowledgeEntry?.(entry);
 
   return {
     video,
@@ -336,7 +337,7 @@ export function composePlan(input: {
   knowledge: KnowledgeEntry[];
   materialSegments: MaterialSegment[];
 }): GeneratedPlan {
-  const primaryKnowledge = input.knowledge[0] ?? knowledgeStore.retrieve({ vertical: "marketing", limit: 1 })[0];
+  const primaryKnowledge = requireKnowledgeEntry(input.knowledge[0], "composePlan");
   const slots = primaryKnowledge.structureSlots;
   const selectedAtoms = selectAtoms(primaryKnowledge.atoms, input.source.strategy);
   const matches = planGaps(matchSlots(slots, input.materialSegments), slots);
@@ -767,7 +768,13 @@ function buildScript(source: SourceInput, slots: StructureSlot[], matches: SlotM
   return [`主题：${source.prompt || "营销短视频重构"}`, `商品：${source.productName || "待填写商品"}`, ...lines].join("\n");
 }
 
-export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
+type MockPipelineOptions = {
+  knowledge: KnowledgeEntry[];
+};
+
+export function runMockPipeline(source?: Partial<SourceInput>, options?: MockPipelineOptions): RunResult {
+  const knowledge = (options?.knowledge ?? []).slice(0, 2);
+  const baseKnowledge = requireKnowledgeEntry(knowledge[0], "runMockPipeline");
   const sampleVideo = createMockVideo("sample", "爆款样例.mp4");
   const materialVideo: VideoMetadata = { ...sampleVideo, role: "material" };
   const sourceWithDefaults = {
@@ -787,8 +794,7 @@ export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
     creativeSkillIds: source?.creativeSkillIds ?? inferCreativeSkillIds(sourceWithDefaults)
   };
 
-  const sample = analyzeSampleVideo(sampleVideo, createMockTranscript(fullSource.productName), { persist: false });
-  const knowledge = knowledgeStore.retrieve({ vertical: "marketing", prompt: fullSource.prompt, limit: 2 });
+  const sample = analyzeSampleVideo(sampleVideo, createMockTranscript(fullSource.productName), { persist: false, baseKnowledge });
   const segments = segmentLongVideo(materialVideo, fullSource.prompt, fullSource.targetDurationSec);
   const generated = composePlan({ source: fullSource, samples: [sample], knowledge, materialSegments: segments });
   const benchmarkScore = scoreCandidate({
@@ -815,8 +821,12 @@ export function runMockPipeline(source?: Partial<SourceInput>): RunResult {
       {
         candidateId: generated.id,
         iterationIndex: 0,
+        script: generated.script,
+        storyboard: generated.storyboard,
         compositionPlan: generated.compositionPlan,
         timeline: generated.timeline,
+        previewVariants: generated.previewVariants,
+        demo: generated.demo,
         benchmarkScore
       }
     ]
@@ -879,6 +889,11 @@ function cleanBriefText(value: string | undefined) {
 function shortText(value: string, maxLength: number) {
   const text = cleanBriefText(value);
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function requireKnowledgeEntry(entry: KnowledgeEntry | undefined, caller: string): KnowledgeEntry {
+  if (!entry) throw new Error(`${caller} requires at least one KnowledgeEntry.`);
+  return entry;
 }
 
 function inferOrientation(width: number, height: number) {

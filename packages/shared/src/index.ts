@@ -382,8 +382,12 @@ export type CandidateIteration = {
   candidateId: string;
   parentCandidateId?: string;
   iterationIndex: number;
+  script: string;
+  storyboard: StoryboardItem[];
   compositionPlan: CompositionPlan;
   timeline: TimelineItem[];
+  previewVariants: PreviewVariant[];
+  demo: GeneratedPlan["demo"];
   benchmarkScore: BenchmarkScore;
 };
 

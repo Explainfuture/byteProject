@@ -7,8 +7,8 @@ import multer from "multer";
 import { ZodError } from "zod";
 import { videoAnalyzerAdapter } from "@byteproject/adapters";
 import { createEmptyBenchmarkScore } from "@byteproject/core";
-import { knowledgeStore } from "@byteproject/knowledge";
 import type { RunResult, SourceInput, VideoMetadata } from "@byteproject/shared";
+import { defaultAgentRuntime } from "./agent/runtime";
 import {
   analyzeSampleWithVision,
   normalizeSourceInput,
@@ -61,7 +61,7 @@ app.get("/api/demo", (_request, response) => {
 });
 
 app.get("/api/knowledge", (_request, response) => {
-  response.json({ entries: knowledgeStore.list() });
+  response.json({ entries: defaultAgentRuntime.knowledge.list() });
 });
 
 app.post("/api/upload/:role", upload.single("video"), async (request, response, next) => {
@@ -95,7 +95,7 @@ app.post("/api/analyze/sample", async (request, response, next) => {
     response.json({
       analysis: publicSampleAnalysis(analysisResult.analysis),
       model: safeModelStatus(analysisResult.model),
-      knowledge: knowledgeStore.list()
+      knowledge: defaultAgentRuntime.knowledge.list()
     });
   } catch (error) {
     next(error);

@@ -1,11 +1,102 @@
 import { describe, expect, it } from "vitest";
-import type { SourceInput, VideoMetadata } from "@byteproject/shared";
+import type { KnowledgeEntry, SourceInput, VideoMetadata } from "@byteproject/shared";
 import { inferCreativeSkillIds } from "@byteproject/shared";
 import { analyzeSampleVideo, createBriefDrivenTranscript, matchSlots, runMockPipeline, segmentLongVideo } from "./index";
 
 describe("mock P0 pipeline", () => {
+  const baseKnowledge: KnowledgeEntry = {
+    id: "test-marketing-knowledge",
+    title: "Test marketing structure",
+    source: "seed",
+    vertical: "marketing",
+    rhythmPattern: "hook -> product -> proof -> offer -> cta",
+    packagingPattern: ["headline", "benefit card", "cta"],
+    applicableWhen: ["product marketing"],
+    atoms: [
+      {
+        id: "atom-test-hook",
+        kind: "hook",
+        name: "Problem hook",
+        intent: "Catch attention",
+        applicableWhen: ["opening"],
+        constraints: ["do not copy source copy"],
+        outputHint: "Use a short question"
+      },
+      {
+        id: "atom-test-proof",
+        kind: "slot",
+        name: "Proof stack",
+        intent: "Show evidence",
+        applicableWhen: ["selling point"],
+        constraints: ["avoid unsupported claims"],
+        outputHint: "Show problem/action/result"
+      },
+      {
+        id: "atom-test-cta",
+        kind: "cta",
+        name: "Specific CTA",
+        intent: "Close with action",
+        applicableWhen: ["ending"],
+        constraints: ["short line"],
+        outputHint: "Use button-like CTA"
+      }
+    ],
+    structureSlots: [
+      {
+        id: "slot-hook",
+        segment: "hook",
+        intent: "Open with a problem",
+        requiredAssetTypes: ["scene", "text_card"],
+        durationSec: 2,
+        importance: "high",
+        rhythmHint: "fast",
+        packagingHints: ["headline"]
+      },
+      {
+        id: "slot-product",
+        segment: "body",
+        intent: "Show product",
+        requiredAssetTypes: ["product_closeup", "cover"],
+        durationSec: 3,
+        importance: "high",
+        rhythmHint: "medium",
+        packagingHints: ["product label"]
+      },
+      {
+        id: "slot-proof",
+        segment: "proof",
+        intent: "Prove benefit",
+        requiredAssetTypes: ["usage", "comparison", "scene"],
+        durationSec: 8,
+        importance: "high",
+        rhythmHint: "fast",
+        packagingHints: ["benefit cards"]
+      },
+      {
+        id: "slot-offer",
+        segment: "offer",
+        intent: "Explain fit",
+        requiredAssetTypes: ["text_card", "scene"],
+        durationSec: 3,
+        importance: "medium",
+        rhythmHint: "medium",
+        packagingHints: ["scenario tag"]
+      },
+      {
+        id: "slot-cta",
+        segment: "cta",
+        intent: "Close with action",
+        requiredAssetTypes: ["product_closeup", "text_card"],
+        durationSec: 2,
+        importance: "high",
+        rhythmHint: "fast",
+        packagingHints: ["cta button"]
+      }
+    ]
+  };
+
   it("generates structure, gaps, composition plan, and timeline", () => {
-    const result = runMockPipeline({ prompt: "生成一个高转化随行杯短视频" });
+    const result = runMockPipeline({ prompt: "生成一个高转化随行杯短视频" }, { knowledge: [baseKnowledge] });
 
     expect(result.samples[0].slots.length).toBeGreaterThanOrEqual(5);
     expect(result.samples[0].atoms.length).toBeGreaterThanOrEqual(3);
@@ -18,6 +109,8 @@ describe("mock P0 pipeline", () => {
     expect(result.generated.demo.status).toBe("mock_ready");
     expect(result.benchmarkScore.totalScore).toBeGreaterThanOrEqual(80);
     expect(result.benchmarkScore.dimensionScores).toHaveLength(7);
+    expect(result.iterations[0].demo).toEqual(result.generated.demo);
+    expect(result.iterations[0].script).toBe(result.generated.script);
   });
 
   it("builds uploaded-video fallback analysis from the user brief instead of default mock copy", () => {
@@ -41,7 +134,7 @@ describe("mock P0 pipeline", () => {
     };
 
     const transcript = createBriefDrivenTranscript(source, video);
-    const analysis = analyzeSampleVideo(video, transcript, { persist: false });
+    const analysis = analyzeSampleVideo(video, transcript, { persist: false, baseKnowledge });
     const output = JSON.stringify({ transcript, analysis });
 
     expect(output).toContain("横屏演示装置");
@@ -73,7 +166,7 @@ describe("mock P0 pipeline", () => {
     expect(longSegments.at(-1)?.endSec).toBeLessThanOrEqual(60);
     expect(shortSegments.length).toBeLessThan(longSegments.length);
 
-    const sample = analyzeSampleVideo(baseVideo, createBriefDrivenTranscript({ productName: "参赛 Agent", targetDurationSec }, baseVideo), { persist: false });
+    const sample = analyzeSampleVideo(baseVideo, createBriefDrivenTranscript({ productName: "参赛 Agent", targetDurationSec }, baseVideo), { persist: false, baseKnowledge });
     const shortMatches = matchSlots(sample.slots, shortSegments);
     const longMatches = matchSlots(sample.slots, longSegments);
 
@@ -81,7 +174,7 @@ describe("mock P0 pipeline", () => {
     expect(longMatches.some((match) => match.status === "matched")).toBe(true);
   });
 
-  it("keeps sample slot ids stable across repeated persisted analyses", () => {
+  it("keeps sample slot ids stable across repeated analyses and emits knowledge explicitly", () => {
     const baseVideo: VideoMetadata = {
       id: "template-regression-a",
       role: "sample",
@@ -92,15 +185,24 @@ describe("mock P0 pipeline", () => {
       fps: 30,
       sizeBytes: 0
     };
-    const first = analyzeSampleVideo(baseVideo, createBriefDrivenTranscript({ productName: "A" }, baseVideo));
+    const emittedKnowledgeIds: string[] = [];
+    const first = analyzeSampleVideo(baseVideo, createBriefDrivenTranscript({ productName: "A" }, baseVideo), {
+      baseKnowledge,
+      onKnowledgeEntry: (entry) => emittedKnowledgeIds.push(entry.id)
+    });
     const second = analyzeSampleVideo(
       { ...baseVideo, id: "template-regression-b", fileName: "template-b.mp4" },
-      createBriefDrivenTranscript({ productName: "B" }, baseVideo)
+      createBriefDrivenTranscript({ productName: "B" }, baseVideo),
+      {
+        baseKnowledge,
+        onKnowledgeEntry: (entry) => emittedKnowledgeIds.push(entry.id)
+      }
     );
 
     expect(first.slots[0].id).toBe("template-regression-a-slot-hook");
     expect(second.slots[0].id).toBe("template-regression-b-slot-hook");
     expect(second.slots.some((slot) => slot.id.includes("template-regression-a"))).toBe(false);
+    expect(emittedKnowledgeIds).toEqual(["knowledge-template-regression-a", "knowledge-template-regression-b"]);
   });
 
   it("infers creative SKU choices from the user brief instead of requiring manual selection", () => {

@@ -1,74 +1,92 @@
 # Architecture
 
-## AI Flow
+## Direction
+
+The system is a short-video structure-transfer agent. It should transfer reusable creative structure from an uploaded sample video into a new brief, without copying source visuals, original subtitles, brands, people, voices, or copy.
+
+The architecture is organized around three rules:
+
+- `packages/core` owns deterministic domain logic and has no dependency on app-level stores, model adapters, or process environment.
+- `apps/api/src/agent/runtime.ts` is the composition seam for concrete adapters: video understanding, plan composition, creative enhancement, preview rendering, and conversation-level knowledge.
+- `apps/api/src/structureAgent.ts` is only the orchestration entry point. It creates context, drives the tool-calling loop, falls back when needed, and delegates implementation details to agent modules.
+
+## Flow
 
 ```mermaid
 flowchart LR
-  A[单个上传视频] --> B[Video Analyzer / Frame Extractor]
-  B --> C[Structure Extractor]
-  C --> D[Technique Atoms]
-  D --> E[Knowledge Store]
-  A --> G[Available Frame / Segment Evaluator]
-  F[新主题 / 商品信息 / 提示词] --> G
-  G --> H[Slot Matcher]
-  E --> I[Knowledge Retriever]
-  I --> J[Creative Composer]
-  H --> K[Gap Planner]
-  K --> J
-  J --> L[脚本 / 分镜 / Composition Plan / Timeline]
-  L --> M[Remotion / HyperFrames Preview Adapter]
-  M --> O[Benchmark Evaluator]
-  O --> P{Score >= 80 且无硬性失败}
-  P -->|Yes| N[Accepted Demo / 10 个预览 / 最佳候选]
-  P -->|No| Q[Revision Brief]
-  Q --> J
+  Upload["Uploaded video + brief"] --> API["apps/api server"]
+  API --> Agent["structureAgent entry"]
+  Agent --> Runtime["AgentRuntime seam"]
+  Runtime --> Vision["Video understanding adapter"]
+  Runtime --> Knowledge["Conversation knowledge store"]
+  Runtime --> Composer["Plan composer adapter"]
+  Runtime --> Creative["Creative enhancement adapter"]
+  Runtime --> Renderer["Preview renderer adapter"]
+  Vision --> Sample["SampleAnalysis"]
+  Knowledge --> Plan["GeneratedPlan"]
+  Composer --> Plan
+  Creative --> Plan
+  Plan --> Benchmark["Benchmark iteration"]
+  Benchmark --> Renderer
+  Benchmark --> Result["RunResult + trace"]
 ```
 
 ## Modules
 
-- `packages/shared`: 共享类型，包括 `TechniqueAtom`、`KnowledgeEntry`、`CompositionPlan`、`TimelineItem`。
-- `packages/knowledge`: 结构知识库，内置营销类种子原子，并支持沉淀样例拆解结果。
-- `packages/core`: P0 深模块，包含单视频结构抽取、关键帧/片段候选、槽位匹配、缺口补全、结果生成、Benchmark Evaluator 和 Iteration Orchestrator。
-- `packages/adapters`: 外部工具协议，封装 FFmpeg、Remotion preview、后续 ASR/LLM/AIGC。
-- `apps/api`: 上传、分析、生成、导出接口。
-- `apps/web`: 可视化工作台。
+- `packages/shared`: shared domain contracts such as `SourceInput`, `SampleAnalysis`, `KnowledgeEntry`, `GeneratedPlan`, `TimelineItem`, `BenchmarkScore`, and `CandidateIteration`.
+- `packages/core`: deterministic structure extraction helpers, segmenting, slot matching, composition scoring, benchmark scoring, and mock pipeline support. It receives `KnowledgeEntry` explicitly and does not import `@byteproject/knowledge`.
+- `packages/knowledge`: seed and conversation-level structure knowledge store.
+- `packages/adapters`: concrete integrations for FFmpeg, model calls, model plan composition, creative enhancement, and Remotion preview rendering.
+- `apps/api/src/agent/runtime.ts`: the single app-level seam that binds concrete adapters and stores into an `AgentRuntime`.
+- `apps/api/src/agent/sampleAnalysis.ts`: converts video understanding results into `SampleAnalysis` and records derived knowledge through the runtime.
+- `apps/api/src/agent/planning.ts`: converts model plan output into internal `GeneratedPlan` and applies model enhancement patches.
+- `apps/api/src/agent/benchmarkIteration.ts`: scores candidates, applies benchmark-driven revisions, and re-renders candidates.
+- `apps/api/src/agent/tools.ts`: declares the tool-calling surface and wires each tool to runtime-backed modules.
+- `apps/api/src/agent/fallbackPipeline.ts`: deterministic workflow used when tool-calling cannot complete.
+- `apps/api/src/agent/result.ts`: response assembly and trace observation summarization.
+- `apps/api/src/structureAgent.ts`: orchestration entry point only.
+- `apps/web/src/apiClient.ts`: browser-side API adapter for demo loading, upload, generation, and result export.
+- `apps/web/src/workbenchController.ts`: the web workbench state seam. It owns demo loading, URL-backed result tabs, upload lifecycle, generation turns, revision submits, and history mutation.
+- `apps/web/src/workbenchConfig.ts`: pure workbench configuration and form-to-API payload mapping. It is the test surface for start validation, default presets, prompt construction, and selling-point normalization.
+- `apps/web/src/historyStore.ts`: local history persistence, result compaction, and history formatting.
+- `apps/web/src/components/WorkbenchShell.tsx`: working navigation shell. It should contain only actionable navigation/status controls, not disabled roadmap buttons.
+- `apps/web/src/components/HistoryWorkspace.tsx`: history page and history summary presentation.
+- `apps/web/src/components/ResultPanels.tsx`: result-tab presentation for structure mapping, gap diagnosis, timeline, packaging, and version panels.
+- `apps/web/src/resultPresentationModel.ts`: pure presentation model for agent steps, benchmark summaries, timeline labels, gaps, and public result text.
+- `apps/web/src/videoFrames.ts`: browser video-frame sampling for upload previews and lightweight vision evidence.
+- `apps/web/src/App.tsx`: feature composition. It should not directly call browser API adapters, history storage, generation endpoints, or own shell navigation implementation.
 
-## Tool Protocol
+## Dependency Rules
 
-每个工具 Adapter 需要声明：
+```mermaid
+flowchart TB
+  Web["apps/web"] --> Api["apps/api"]
+  Api --> Runtime["agent/runtime"]
+  Runtime --> Adapters["packages/adapters"]
+  Runtime --> Knowledge["packages/knowledge"]
+  Api --> Core["packages/core"]
+  Core --> Shared["packages/shared"]
+  Knowledge --> Shared
+  Adapters --> Shared
+```
 
-- `name`
-- `inputSchema`
-- `outputSchema`
-- `requiredEnv`
-- `filePermissions`
-- `timeoutMs`
-- `fallback`
+Rules:
 
-当前工具：
+- `packages/core` may depend on `packages/shared` only.
+- Concrete model, renderer, and knowledge-store dependencies are app composition concerns and should stay behind `AgentRuntime`.
+- Tests that exercise agent orchestration should inject a fake `AgentRuntime` rather than touching real providers.
+- API response helpers must sanitize local paths and provider details before returning public data.
 
-- FFmpeg Video Analyzer: 读取元数据，失败时降级为 mock metadata。
-- Remotion Storyboard Renderer: 当前生成 10 个本地风格赛道的低保真 HTML/Remotion 预览，后续替换为 Remotion MP4。
-- Model Adapter: 通过 Ark/Doubao-compatible 接口分析 4-16 张中等抽帧、增强脚本和生成 Remotion/HyperFrames 渲染提示；默认规则链路可运行。
-- Benchmark Evaluator: 对生成候选执行 100 分制评分，输出 `BenchmarkScore`、硬性失败、扣分证据、top fixes 和可回传模型的 `revisionBrief`。
-- Iteration Orchestrator: 低于 60 分或触发硬性失败时自动重生成，60-79 分可继续优化，80 分以上且无硬性失败才 accepted；默认最多迭代 3 轮并保留最高分候选。
-- Knowledge Adapter: 本地知识库读写和检索。
+## Verification Gates
 
-## Safety Boundaries
+- `npm run test` must cover core behavior and the API runtime seam.
+- `apps/web/src/workbenchConfig.test.ts` must cover prompt/payload construction because that is the interface between UI state and the generation API.
+- `npm run typecheck` must pass across all workspaces.
+- `rg "@byteproject/knowledge|knowledgeStore|seedKnowledge" packages/core` should return no matches.
+- `rg "fetchDemoResult|uploadVideoFile|generateStructureTransfer|downloadResultJson|readHistoryEntries|writeHistoryEntries" apps/web/src/App.tsx` should return no matches.
+- `node scripts/verify-ui.mjs` asserts that the visible workbench has no disabled shell buttons, no retired placeholder entries, and no common mojibake tokens in rendered text.
+- `rg "modelCreativeAdapter|modelPlanComposerAdapter|modelVideoUnderstandingAdapter|remotionStoryboardAdapter" apps/api/src` should show concrete adapters concentrated in `apps/api/src/agent/runtime.ts` plus type-only references.
 
-- 上传视频只用于结构分析、关键帧候选和经验沉淀。
-- 禁止复用样例画面、音频、人物、品牌、原字幕、原文案。
-- 生成结果只能复用结构描述、原子技巧和包装方法。
-- Benchmark 不能把 mock/规则 fallback 包装成真实视频理解；缺少真实视觉 slots 时必须触发分数上限或显式降级说明。
-- 用户上传视频只在 `UPLOAD_DIR`、`OUTPUT_DIR`、`TMP_DIR` 内处理。
-- 密钥只从环境变量读取，不进入仓库。
-- 默认不记录模型 prompt/response。
-- 导出结果区分原始素材、衍生素材和补全素材。
+## Known Limits
 
-## Current P0 Limitations
-
-- 当前视频分析和 ASR 默认走 mock/规则链路。
-- 当前成片 demo 是 HTML 低保真预览，还不是 MP4。
-- 未接入真实 Doubao/OpenAI-compatible model adapter。
-- Benchmark 当前规划为规则 + 可选模型评测；真实实现仍需接入渲染截图、预览可播放检测和低分重生成链路。
-- 未实现真实封面图、背景图、配音或视频生成。
+- `apps/web/src/App.tsx` still contains several local presentation panels. The workflow state and shell navigation have moved behind deeper modules; the next extraction should be driven by independent ownership or tests, not file-length aesthetics alone.
