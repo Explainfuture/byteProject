@@ -1,5 +1,41 @@
 export type CreativeStrategy = "balanced" | "high_click" | "high_conversion" | "high_rhythm" | "premium";
 
+export type FrameBudget = {
+  minFrames: number;
+  maxFrames: number;
+  secondsPerFrame: number;
+};
+
+export const DEFAULT_FRAME_BUDGET: FrameBudget = {
+  minFrames: 4,
+  maxFrames: 16,
+  secondsPerFrame: 4
+};
+
+export function normalizeFrameBudget(input: Partial<FrameBudget> = {}): FrameBudget {
+  const minFrames = normalizePositiveInteger(input.minFrames, DEFAULT_FRAME_BUDGET.minFrames);
+  const maxFrames = Math.max(minFrames, normalizePositiveInteger(input.maxFrames, DEFAULT_FRAME_BUDGET.maxFrames));
+  const secondsPerFrame = normalizePositiveNumber(input.secondsPerFrame, DEFAULT_FRAME_BUDGET.secondsPerFrame);
+  return { minFrames, maxFrames, secondsPerFrame };
+}
+
+export function frameSampleCountForDuration(durationSec: number | undefined, budget: FrameBudget = DEFAULT_FRAME_BUDGET) {
+  const normalizedBudget = normalizeFrameBudget(budget);
+  const safeDuration = Number.isFinite(durationSec) && Number(durationSec) > 0 ? Number(durationSec) : 18;
+  return Math.max(
+    normalizedBudget.minFrames,
+    Math.min(normalizedBudget.maxFrames, Math.ceil(safeDuration / normalizedBudget.secondsPerFrame))
+  );
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number) {
+  return Number.isFinite(value) && Number(value) > 0 ? Math.round(Number(value)) : fallback;
+}
+
+function normalizePositiveNumber(value: number | undefined, fallback: number) {
+  return Number.isFinite(value) && Number(value) > 0 ? Number(value) : fallback;
+}
+
 export type CreativeReconstructionSkillId =
   | "structural_visual_copy_trading"
   | "ctr_threshold_creative_mining"
@@ -284,11 +320,7 @@ export type PreviewVariant = {
   description: string;
   renderer: "remotion" | "hyperframes";
   targetDurationSec: number;
-  frameBudget: {
-    minFrames: number;
-    maxFrames: number;
-    secondsPerFrame: number;
-  };
+  frameBudget: FrameBudget;
   promptHint: string;
 };
 

@@ -99,9 +99,8 @@ if (iterationCount < 1 || iterationsWithDemo < 1) {
 await page.locator(".result-shell").waitFor({ state: "visible" });
 await assertBodyTextClean(page, "result");
 
-const demoTitleCount = await page.getByRole("heading", { name: /已生成 .* 秒结构化预览/ }).count();
-const fakeRemotionPlayerCount = await page.locator(".fake-remotion-player").count();
-const phoneRemotionPlayerCount = await page.locator(".phone-remotion-player").count();
+const demoTitleCount = await page.getByRole("heading", { name: /已生成(自动化视频草稿| .* 秒结构化预览)/ }).count();
+const generatedVideoCount = await page.locator(".generated-video-card video").count();
 const naturalLanguageInputCount = await page.locator("#revisionPrompt").count();
 const videoAgentPanelCount = await page.locator(".video-agent-panel").count();
 const agentToolCallCount = await page.locator(".agent-tool-call").count();
@@ -110,9 +109,12 @@ const candidateIterationCardCount = await page.locator(".candidate-iteration-gri
 const candidateIterationVideoCount = await page.locator(".candidate-iteration-grid video").count();
 const adaptiveVideoClasses = await page.locator(".adaptive-video-frame").evaluateAll((nodes) => nodes.map((node) => node.className));
 const landscapeVideoFrameCount = adaptiveVideoClasses.filter((className) => className.includes("landscape")).length;
+if (demoTitleCount < 1 || generatedVideoCount < 1) {
+  throw new Error(`成片预览不完整。titles=${demoTitleCount}, generatedVideos=${generatedVideoCount}`);
+}
 if (videoAgentPanelCount !== 1 || agentToolCallCount !== 1 || naturalLanguageInputCount !== 1 || userAgentBubbleCount < 1) {
   throw new Error(
-    `智能体对话面板或预览区不完整。panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, previews=${fakeRemotionPlayerCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
+    `智能体对话面板或预览区不完整。panel=${videoAgentPanelCount}, tools=${agentToolCallCount}, generatedVideos=${generatedVideoCount}, input=${naturalLanguageInputCount}, userBubbles=${userAgentBubbleCount}`
   );
 }
 if (candidateIterationCardCount < 1 || candidateIterationVideoCount < 1) {
@@ -129,8 +131,11 @@ await page.locator(".result-nav button", { hasText: "缺口" }).click();
 const diagnosisCardCount = await page.locator(".diagnosis-card").count();
 
 await page.locator(".result-nav button", { hasText: "时间线" }).click();
-const timelineSegmentCount = await page.locator(".timeline-segment").count();
-const timelineDeliveryCardCount = await page.locator(".timeline-delivery-card").count();
+const lightTimelineTrackCount = await page.locator(".light-track").count();
+const lightTimelineItemCount = await page.locator(".track-item").count();
+if (lightTimelineTrackCount < 4 || lightTimelineItemCount < 1) {
+  throw new Error(`时间线视图不完整。tracks=${lightTimelineTrackCount}, items=${lightTimelineItemCount}`);
+}
 const timelineScreenshotPath = resolve("data/tmp/ui-timeline.png");
 await page.screenshot({ path: timelineScreenshotPath, fullPage: true });
 
@@ -193,8 +198,7 @@ const result = {
   iterationsWithDemo,
   benchmarkDimensionCount,
   demoTitleCount,
-  fakeRemotionPlayerCount,
-  phoneRemotionPlayerCount,
+  generatedVideoCount,
   naturalLanguageInputCount,
   videoAgentPanelCount,
   agentToolCallCount,
@@ -203,8 +207,8 @@ const result = {
   candidateIterationVideoCount,
   mappingRowCount,
   diagnosisCardCount,
-  timelineSegmentCount,
-  timelineDeliveryCardCount,
+  lightTimelineTrackCount,
+  lightTimelineItemCount,
   timelineScreenshotPath,
   screenshotPath,
   historyCardCount,

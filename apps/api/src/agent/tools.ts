@@ -1,8 +1,7 @@
 import { z } from "zod";
 import { segmentLongVideo } from "@byteproject/core";
-import { inferCreativeSkillIds } from "@byteproject/shared";
+import { DEFAULT_FRAME_BUDGET, inferCreativeSkillIds } from "@byteproject/shared";
 import { ensureBenchmarkScore, renderCurrentCandidate } from "./benchmarkIteration";
-import { FRAME_BUDGET } from "./constants";
 import { composeModelGeneratedPlan, addAnalysisRationale, applyModelEnhancement } from "./planning";
 import { publicVideo, safeModelStatus } from "./publicContracts";
 import { defaultAgentRuntime } from "./runtime";
@@ -57,9 +56,9 @@ export function createAgentTools(runtime: AgentRuntime = defaultAgentRuntime): A
         ],
         framePlan: {
           strategy: "middle-budget",
-          minFrames: FRAME_BUDGET.minFrames,
-          maxFrames: FRAME_BUDGET.maxFrames,
-          secondsPerFrame: FRAME_BUDGET.secondsPerFrame
+          minFrames: DEFAULT_FRAME_BUDGET.minFrames,
+          maxFrames: DEFAULT_FRAME_BUDGET.maxFrames,
+          secondsPerFrame: DEFAULT_FRAME_BUDGET.secondsPerFrame
         }
       };
     }

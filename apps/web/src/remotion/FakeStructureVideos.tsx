@@ -5,7 +5,6 @@ import type { VideoStyleTrack } from "@byteproject/shared";
 export type FakeVideoVariant = VideoStyleTrack;
 
 export const REMOTION_FAKE_VIDEO_FPS = 30;
-export const REMOTION_FAKE_VIDEO_FRAMES = 540;
 export const REMOTION_FAKE_VIDEO_WIDTH = 1080;
 export const REMOTION_FAKE_VIDEO_HEIGHT = 1920;
 

@@ -7,6 +7,7 @@ import multer from "multer";
 import { ZodError } from "zod";
 import { videoAnalyzerAdapter } from "@byteproject/adapters";
 import { createEmptyBenchmarkScore } from "@byteproject/core";
+import { frameSampleCountForDuration, normalizeFrameBudget } from "@byteproject/shared";
 import type { RunResult, SourceInput, VideoMetadata } from "@byteproject/shared";
 import { defaultAgentRuntime } from "./agent/runtime";
 import {
@@ -27,9 +28,6 @@ const app = express();
 const port = Number(process.env.API_PORT ?? 8787);
 const uploadDir = resolve(process.env.UPLOAD_DIR ?? "data/uploads");
 const outputDir = resolve(process.env.OUTPUT_DIR ?? "data/outputs");
-const defaultMinVisionFrames = 4;
-const defaultMaxVisionFrames = 16;
-const defaultSecondsPerVisionFrame = 4;
 
 await mkdir(uploadDir, { recursive: true });
 await mkdir(outputDir, { recursive: true });
@@ -227,12 +225,12 @@ function parsePreviewFrames(value: unknown, durationSec?: number): string[] | un
 }
 
 function resolveVisionFrameCount(durationSec: number | undefined) {
-  const configuredMin = Number(process.env.VISION_MIN_FRAME_COUNT ?? defaultMinVisionFrames);
-  const configuredMax = Number(process.env.VISION_MAX_FRAME_COUNT ?? defaultMaxVisionFrames);
-  const configuredSecondsPerFrame = Number(process.env.VISION_SECONDS_PER_FRAME ?? defaultSecondsPerVisionFrame);
-  const minFrames = Number.isFinite(configuredMin) && configuredMin > 0 ? Math.round(configuredMin) : defaultMinVisionFrames;
-  const maxFrames = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.max(minFrames, Math.round(configuredMax)) : defaultMaxVisionFrames;
-  const secondsPerFrame = Number.isFinite(configuredSecondsPerFrame) && configuredSecondsPerFrame > 0 ? configuredSecondsPerFrame : defaultSecondsPerVisionFrame;
-  const safeDuration = Number.isFinite(durationSec) && Number(durationSec) > 0 ? Number(durationSec) : 18;
-  return Math.max(minFrames, Math.min(maxFrames, Math.ceil(safeDuration / secondsPerFrame)));
+  return frameSampleCountForDuration(
+    durationSec,
+    normalizeFrameBudget({
+      minFrames: Number(process.env.VISION_MIN_FRAME_COUNT),
+      maxFrames: Number(process.env.VISION_MAX_FRAME_COUNT),
+      secondsPerFrame: Number(process.env.VISION_SECONDS_PER_FRAME)
+    })
+  );
 }

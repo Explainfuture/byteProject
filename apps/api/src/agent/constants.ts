@@ -1,11 +1,5 @@
 import type { PreviewVariant } from "@byteproject/shared";
 
-export const FRAME_BUDGET = {
-  minFrames: 4,
-  maxFrames: 16,
-  secondsPerFrame: 4
-} as const;
-
 export const BENCHMARK_MAX_ITERATIONS = 3;
 
 export const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "frameBudget" | "promptHint">> = [

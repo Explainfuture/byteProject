@@ -1,4 +1,3 @@
-import React from "react";
 import { AbsoluteFill, Sequence, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
 
 export const STORYBOARD_WIDTH = 1080;
@@ -143,7 +142,7 @@ function Scene(props: { item: TimelineItem; index: number; total: number; theme:
   const exit = interpolate(frame, [durationInFrames - 16, durationInFrames], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   const progress = interpolate(frame, [0, Math.max(1, durationInFrames - 1)], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   const kind = slotKind(props.item.slotId);
-  const captionLines = splitForVideo(props.item.caption || fallbackCaption(kind), kind === "hook" ? 9 : 11, 4);
+  const captionLines = splitForVideo(props.item.caption || fallbackCaption(), kind === "hook" ? 9 : 11, 4);
   const packaging = normalizePackaging(props.item.packaging);
   const y = interpolate(enter, [0, 1], [72, 0]);
   const opacity = enter * exit;
@@ -162,7 +161,7 @@ function Scene(props: { item: TimelineItem; index: number; total: number; theme:
 
         <div style={{ position: "absolute", left: 86, right: 86, top: kind === "hook" ? 438 : 384 }}>
           <div style={{ color: props.theme.accent, fontSize: 26, fontWeight: 800, letterSpacing: 6, textTransform: "uppercase", marginBottom: 34 }}>
-            {sceneDirection(kind, props.item.transition)}
+            {sceneDirection(props.item.transition)}
           </div>
           <div>
             {captionLines.map((line, lineIndex) => {
@@ -403,12 +402,11 @@ function slotKind(slotId: string | undefined) {
   return "beat";
 }
 
-function fallbackCaption(kind: string) {
-  void kind;
+function fallbackCaption() {
   return "";
 }
 
-function sceneDirection(kind: string, transition?: string) {
+function sceneDirection(transition?: string) {
   if (transition) return limitText(transition, 32);
   return "ANALYSIS BEAT";
 }

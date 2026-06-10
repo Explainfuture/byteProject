@@ -11,16 +11,6 @@ export type StartValidationErrors = {
   prompt?: string;
 };
 
-export type StructureSkillPreset = {
-  id: string;
-  name: string;
-  kind: string;
-  decision: string;
-  detail: string;
-  track: VideoStyleTrack;
-  form: AppForm;
-};
-
 export type UploadedVideo = {
   id: string;
   name: string;

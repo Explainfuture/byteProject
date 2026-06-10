@@ -4,7 +4,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { creativeReconstructionSkills } from "@byteproject/shared";
+import { DEFAULT_FRAME_BUDGET, creativeReconstructionSkills, frameSampleCountForDuration, normalizeFrameBudget } from "@byteproject/shared";
 import type {
   AssetType,
   GapStrategy,
@@ -21,9 +21,6 @@ const require = createRequire(import.meta.url);
 const bundledFfmpegPath = require("ffmpeg-static") as string | null;
 const bundledFfprobePath = (require("ffprobe-static") as { path?: string }).path;
 const installerFfmpegPath = (require("@ffmpeg-installer/ffmpeg") as { path?: string }).path;
-const DEFAULT_SECONDS_PER_VISION_FRAME = 4;
-const DEFAULT_MIN_VISION_FRAMES = 4;
-const DEFAULT_MAX_VISION_FRAMES = 16;
 const REMOTION_STORYBOARD_COMPOSITION_ID = "ByteProjectStoryboard";
 
 export type ToolProtocol<I, O> = {
@@ -1343,7 +1340,7 @@ function buildVideoUnderstandingMessages(input: ModelVideoUnderstandingInput, fr
                 ? "根据这些从样例视频抽取的关键帧，拆解爆款短视频结构。输出脚本段落、Hook/Body/Proof/Offer/CTA 槽位、节奏、包装、字幕/语音概览。"
                 : "根据这些从用户素材视频抽取的关键帧，识别可用于重构短视频的素材类型、画面内容和缺口。",
             frameSampling:
-              `采用中等抽帧预算：${DEFAULT_MIN_VISION_FRAMES}-${DEFAULT_MAX_VISION_FRAMES} 张，约每 ${DEFAULT_SECONDS_PER_VISION_FRAME} 秒一帧；不要假设未看到的细节。`,
+              `采用中等抽帧预算：${DEFAULT_FRAME_BUDGET.minFrames}-${DEFAULT_FRAME_BUDGET.maxFrames} 张，约每 ${DEFAULT_FRAME_BUDGET.secondsPerFrame} 秒一帧；不要假设未看到的细节。`,
             video: {
               fileName: input.video.fileName,
               durationSec: input.video.durationSec,
@@ -1473,14 +1470,14 @@ function normalizeUploadedFrameDataUrls(value: string[] | undefined, durationSec
 }
 
 function resolveVisionFrameCount(durationSec: number | undefined) {
-  const configuredMin = Number(process.env.VISION_MIN_FRAME_COUNT ?? DEFAULT_MIN_VISION_FRAMES);
-  const configuredMax = Number(process.env.VISION_MAX_FRAME_COUNT ?? DEFAULT_MAX_VISION_FRAMES);
-  const configuredSecondsPerFrame = Number(process.env.VISION_SECONDS_PER_FRAME ?? DEFAULT_SECONDS_PER_VISION_FRAME);
-  const minFrames = Number.isFinite(configuredMin) && configuredMin > 0 ? Math.round(configuredMin) : DEFAULT_MIN_VISION_FRAMES;
-  const maxFrames = Number.isFinite(configuredMax) && configuredMax > 0 ? Math.max(minFrames, Math.round(configuredMax)) : DEFAULT_MAX_VISION_FRAMES;
-  const secondsPerFrame = Number.isFinite(configuredSecondsPerFrame) && configuredSecondsPerFrame > 0 ? configuredSecondsPerFrame : DEFAULT_SECONDS_PER_VISION_FRAME;
-  const safeDuration = Number.isFinite(durationSec) && Number(durationSec) > 0 ? Number(durationSec) : 18;
-  return Math.max(minFrames, Math.min(maxFrames, Math.ceil(safeDuration / secondsPerFrame)));
+  return frameSampleCountForDuration(
+    durationSec,
+    normalizeFrameBudget({
+      minFrames: Number(process.env.VISION_MIN_FRAME_COUNT),
+      maxFrames: Number(process.env.VISION_MAX_FRAME_COUNT),
+      secondsPerFrame: Number(process.env.VISION_SECONDS_PER_FRAME)
+    })
+  );
 }
 
 function resolveFfmpegPath() {

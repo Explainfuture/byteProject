@@ -1,5 +1,5 @@
 import type { RunResult } from "@byteproject/shared";
-import type { AgentRunResult, AgentTraceItem, AgentTurn, HistoryEntry } from "./workbenchTypes";
+import type { AgentRunResult, AgentTurn, HistoryEntry } from "./workbenchTypes";
 
 const HISTORY_STORAGE_KEY = "byteproject:migration-history";
 const HISTORY_LIMIT = 20;

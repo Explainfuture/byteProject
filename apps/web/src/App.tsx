@@ -17,8 +17,7 @@ import {
   ScanSearch,
   Send,
   Sparkles,
-  Upload,
-  Wand2
+  Upload
 } from "lucide-react";
 import { Player } from "@remotion/player";
 import type { RunResult, SlotMatch, StructureSlot } from "@byteproject/shared";
@@ -31,20 +30,10 @@ import {
   benchmarkSummaryLabel,
   buildDynamicLiveAgentSteps,
   buildDynamicResultAgentSteps,
-  compactTimelineText,
   currentAgentToolStep,
   currentLiveAgentStepIndex,
   firstBriefLine,
-  formatTimelineSeconds,
-  gapTitle,
   hardFailureTitle,
-  publicRationale,
-  rhythmLabel,
-  segmentLabel,
-  segmentLabelFromSlotId,
-  slotDisplayName,
-  statusLabel,
-  timeRange,
   toolMetaLabel,
   weakestBenchmarkDimension
 } from "./resultPresentationModel";
@@ -56,17 +45,10 @@ import {
   type FakeVideoVariant
 } from "./remotion/FakeStructureVideos";
 import {
-  aspectRatioOptions,
-  ctaStyleOptions,
-  hookStyleOptions,
-  rhythmOptions,
-  splitSellingPoints,
-  structureSkillPresets,
-  subtitleStyleOptions,
-  visualStyleOptions
+  aspectRatioOptions
 } from "./workbenchConfig";
 import { useWorkbenchController } from "./workbenchController";
-import type { AgentRunResult, AgentToolStep, AgentTurn, AppForm, ResultTab, StartValidationErrors, StructureSkillPreset, UploadedVideo, UploadRole } from "./workbenchTypes";
+import type { AgentRunResult, AgentToolStep, AgentTurn, AppForm, ResultTab, StartValidationErrors, UploadedVideo, UploadRole } from "./workbenchTypes";
 
 type VideoOrientation = "landscape" | "portrait" | "square" | "unknown";
 
@@ -329,59 +311,6 @@ function WorkflowStep(props: { index: number; label: string; state: "done" | "ac
     <div className={`workflow-step ${props.state}`}>
       <span>{props.state === "done" ? <CheckCircle2 size={16} aria-hidden="true" /> : props.index}</span>
       <strong>{props.label}</strong>
-    </div>
-  );
-}
-
-function TemplateVideoLibrary(props: { onSelect: (preset: StructureSkillPreset) => void }) {
-  return (
-    <section className="template-video-library" aria-label="演示示例视频">
-      <div className="template-library-head">
-        <span>没有视频？</span>
-        <strong>选择一条示例素材进入上传流程</strong>
-      </div>
-      <div className="skill-preset-deck template-video-deck">
-      {structureSkillPresets.map((preset) => (
-        <button
-          key={preset.id}
-          type="button"
-          title={preset.detail}
-          data-tooltip={preset.detail}
-          onClick={() => props.onSelect(preset)}
-        >
-          <TemplateSamplePlayer preset={preset} />
-          <span>{preset.kind}</span>
-          <strong>{preset.name}</strong>
-          <small>{preset.decision} · 点击使用</small>
-        </button>
-      ))}
-      </div>
-    </section>
-  );
-}
-
-function TemplateSamplePlayer(props: { preset: StructureSkillPreset }) {
-  const points = splitSellingPoints(props.preset.form.sellingPoints);
-  return (
-    <div className="template-sample-player" aria-hidden="true">
-      <Player
-        component={MarketingFakeVideo}
-        durationInFrames={Math.max(1, Math.round(Math.min(60, props.preset.form.targetDurationSec) * REMOTION_FAKE_VIDEO_FPS))}
-        fps={REMOTION_FAKE_VIDEO_FPS}
-        compositionWidth={REMOTION_FAKE_VIDEO_WIDTH}
-        compositionHeight={REMOTION_FAKE_VIDEO_HEIGHT}
-        inputProps={{
-          productName: props.preset.form.productName,
-          points,
-          audience: props.preset.form.targetAudience,
-          variant: props.preset.track as FakeVideoVariant
-        }}
-        loop
-        autoPlay
-        initialFrame={36}
-        initiallyMuted
-        style={{ width: "100%" }}
-      />
     </div>
   );
 }

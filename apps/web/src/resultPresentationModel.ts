@@ -344,12 +344,6 @@ export function gapTitle(slot: StructureSlot | undefined, match: SlotMatch) {
   return match.status === "weak_match" ? "素材表达力度不足" : "缺少关键支撑素材";
 }
 
-function hasFallbackVision(result: AgentRunResult) {
-  const visionTrace = result.agentTrace?.find((item) => item.tool === "vision_model" || item.tool === "analyze_sample_video");
-  if (visionTrace) return !visionTrace.ok || String(JSON.stringify(visionTrace.observation)).includes("fallback");
-  return result.generated.compositionPlan.rationale.some((item) => item.includes("在线模型") || item.includes("本地结构规则"));
-}
-
 function traceFrameCount(trace: AgentTraceItem[] | undefined) {
   if (!trace?.length) return undefined;
   for (const item of trace) {

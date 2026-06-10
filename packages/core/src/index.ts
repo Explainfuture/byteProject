@@ -1,4 +1,4 @@
-import { creativeReconstructionSkills, inferCreativeSkillIds } from "@byteproject/shared";
+import { DEFAULT_FRAME_BUDGET, creativeReconstructionSkills, inferCreativeSkillIds } from "@byteproject/shared";
 import type {
   AssetType,
   BenchmarkDimensionId,
@@ -22,12 +22,6 @@ import type {
   TranscriptLine,
   VideoMetadata
 } from "@byteproject/shared";
-
-const FRAME_BUDGET = {
-  minFrames: 4,
-  maxFrames: 16,
-  secondsPerFrame: 4
-} as const;
 
 const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "frameBudget" | "promptHint">> = [
   {
@@ -681,10 +675,10 @@ function buildPreviewVariants(source: SourceInput, timeline: TimelineItem[]): Pr
     id: `preview-${index + 1}-${track.track}`,
     ...track,
     targetDurationSec,
-    frameBudget: { ...FRAME_BUDGET },
+    frameBudget: { ...DEFAULT_FRAME_BUDGET },
     promptHint: [
       `使用 ${track.renderer} 生成「${track.title}」预览。`,
-      `总时长控制在 ${targetDurationSec} 秒内，抽帧预算 ${FRAME_BUDGET.minFrames}-${FRAME_BUDGET.maxFrames} 张，约每 ${FRAME_BUDGET.secondsPerFrame} 秒一帧。`,
+      `总时长控制在 ${targetDurationSec} 秒内，抽帧预算 ${DEFAULT_FRAME_BUDGET.minFrames}-${DEFAULT_FRAME_BUDGET.maxFrames} 张，约每 ${DEFAULT_FRAME_BUDGET.secondsPerFrame} 秒一帧。`,
       `输入脚本来自结构迁移结果，禁止复用样例视频原画面、原字幕和原文案。`,
       `重点表达：${track.description}`
     ].join(" ")
@@ -697,7 +691,7 @@ function buildRendererPrompt(source: SourceInput, script: string, timeline: Time
     task: "Generate local Remotion preview compositions from the transferred structure.",
     constraints: {
       maxDurationSec: 60,
-      frameBudget: FRAME_BUDGET,
+      frameBudget: DEFAULT_FRAME_BUDGET,
       preserveTimelineTiming: true,
       doNotCopySampleContent: true,
       output: "playable local Remotion preview first; MP4 export is optional"

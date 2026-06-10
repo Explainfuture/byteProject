@@ -41,10 +41,6 @@ export type CompleteAgentContext = AgentContext & {
   generated: GeneratedPlan;
 };
 
-export type ScoredAgentContext = CompleteAgentContext & {
-  benchmarkScore: BenchmarkScore;
-};
-
 export type AgentRunResult = RunResult & {
   agentTrace: AgentTraceItem[];
   agentMode: "tool-calling" | "fallback";

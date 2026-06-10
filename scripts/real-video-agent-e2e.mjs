@@ -73,7 +73,7 @@ const domMetrics = {
   toolStackCount: await page.locator(".agent-tool-stack").count(),
   runningToolCount: await page.locator(".agent-tool-call.running").count(),
   fallbackToolCount: await page.locator(".agent-tool-call.fallback").count(),
-  headingNoteCount: await page.locator(".studio-subtitle, .section-heading p, .result-header p, .panel-title p, .demo-explain > p, .source-video-card header span").count(),
+  headingNoteCount: await page.locator(".section-heading p, .result-header p, .panel-title p, .demo-explain > p, .source-video-card header span").count(),
   revisionInputCount: await page.locator("#revisionPrompt").count(),
   uploadedVideoNameVisible: await page.getByText(basename(videoPath)).count()
 };

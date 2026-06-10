@@ -1,6 +1,4 @@
-const MIN_PREVIEW_FRAME_COUNT = 4;
-const MAX_PREVIEW_FRAME_COUNT = 16;
-const SECONDS_PER_PREVIEW_FRAME = 4;
+import { frameSampleCountForDuration } from "@byteproject/shared";
 
 export async function extractVideoFrameDataUrls(file: File) {
   const video = document.createElement("video");
@@ -39,11 +37,6 @@ export async function extractVideoFrameDataUrls(file: File) {
     video.load();
     URL.revokeObjectURL(objectUrl);
   }
-}
-
-function frameSampleCountForDuration(durationSec: number) {
-  const safeDuration = Number.isFinite(durationSec) && durationSec > 0 ? durationSec : 18;
-  return Math.max(MIN_PREVIEW_FRAME_COUNT, Math.min(MAX_PREVIEW_FRAME_COUNT, Math.ceil(safeDuration / SECONDS_PER_PREVIEW_FRAME)));
 }
 
 function waitForVideoEvent(video: HTMLVideoElement, eventName: "loadedmetadata" | "seeked") {

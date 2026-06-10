@@ -1,5 +1,6 @@
+import { DEFAULT_FRAME_BUDGET } from "@byteproject/shared";
 import type { GeneratedPlan, KnowledgeEntry, MaterialSegment, PreviewVariant, SampleAnalysis, SourceInput, TimelineItem } from "@byteproject/shared";
-import { FRAME_BUDGET, previewTracks } from "./constants";
+import { previewTracks } from "./constants";
 import { getFrameCount } from "./publicContracts";
 import { defaultAgentRuntime } from "./runtime";
 import type { AgentRuntime } from "./runtime";
@@ -156,10 +157,10 @@ function buildPreviewVariants(source: SourceInput, timeline: TimelineItem[]): Pr
     id: `preview-${index + 1}-${track.track}`,
     ...track,
     targetDurationSec,
-    frameBudget: { ...FRAME_BUDGET },
+    frameBudget: { ...DEFAULT_FRAME_BUDGET },
     promptHint: [
       `Render a ${track.title} local preview with ${track.renderer}.`,
-      `Keep the result within ${targetDurationSec}s and use a ${FRAME_BUDGET.minFrames}-${FRAME_BUDGET.maxFrames} frame analysis budget.`,
+      `Keep the result within ${targetDurationSec}s and use a ${DEFAULT_FRAME_BUDGET.minFrames}-${DEFAULT_FRAME_BUDGET.maxFrames} frame analysis budget.`,
       "Use the transferred structure and new brief only; do not copy sample visuals, sample subtitles, or original copy.",
       `Focus: ${track.description}`
     ].join(" ")
