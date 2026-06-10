@@ -376,9 +376,9 @@ export function composePlan(input: {
 
 const BENCHMARK_THRESHOLD = {
   regenerateBelow: 60,
-  targetScore: 80,
-  excellentFrom: 85,
-  maxIterations: 3
+  targetScore: 90,
+  excellentFrom: 95,
+  maxIterations: 5
 } as const;
 
 const dimensionLabels: Record<BenchmarkDimensionId, string> = {
@@ -388,7 +388,13 @@ const dimensionLabels: Record<BenchmarkDimensionId, string> = {
   retention_rhythm: "叙事推进与留存节奏",
   visual_packaging_watchability: "画面包装与可观看性",
   asset_gap_handling: "素材利用与缺口处理",
-  safety_explainability: "合规、安全与可解释性"
+  safety_explainability: "合规、安全与可解释性",
+  user_brief_alignment: "用户需求和商品表达",
+  uploaded_video_usage: "上传视频结构和素材利用",
+  hook_retention: "前 3 秒 hook、节奏和留存",
+  visual_packaging: "画面包装、字幕、转场和可看性",
+  remotion_code_delta: "Remotion 代码变化真实有效",
+  safety_compliance: "安全合规"
 };
 
 export function scoreCandidate(input: {

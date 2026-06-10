@@ -1,6 +1,6 @@
 import type { PreviewVariant } from "@byteproject/shared";
 
-export const BENCHMARK_MAX_ITERATIONS = 3;
+export const BENCHMARK_MAX_ITERATIONS = 5;
 
 export const previewTracks: Array<Omit<PreviewVariant, "id" | "targetDurationSec" | "frameBudget" | "promptHint">> = [
   {

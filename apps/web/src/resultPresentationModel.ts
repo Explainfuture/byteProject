@@ -102,7 +102,14 @@ export function hardFailureTitle(code?: string) {
     empty_preview: "成片证据不够",
     copied_sample_content: "迁移边界过近",
     brief_mismatch: "用户目标没吃透",
-    sensitive_leak: "敏感信息风险"
+    sensitive_leak: "敏感信息风险",
+    render_failed: "渲染失败",
+    invalid_video: "视频不可用",
+    missing_required_material_use: "素材使用证据不足",
+    no_remotion_code_delta: "代码没有实质变化",
+    unsafe_content: "安全合规风险",
+    stagnant_iteration: "迭代没有变化",
+    mock_mode: "模拟模式不能收片"
   };
   return labels[code ?? ""] ?? "关键阻塞";
 }

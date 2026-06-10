@@ -7,11 +7,13 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_FRAME_BUDGET, creativeReconstructionSkills, frameSampleCountForDuration, normalizeFrameBudget } from "@byteproject/shared";
 import type {
   AssetType,
+  BenchmarkScore,
   GapStrategy,
   GeneratedPlan,
   KnowledgeEntry,
   MatchStatus,
   MaterialSegment,
+  RemotionCompositionDsl,
   SampleAnalysis,
   SourceInput,
   VideoMetadata
@@ -90,7 +92,7 @@ export const videoAnalyzerAdapter: ToolProtocol<
 };
 
 export const remotionStoryboardAdapter: ToolProtocol<
-  { plan: GeneratedPlan; outputDir: string; materialVideo?: VideoMetadata; materialSegments?: MaterialSegment[] },
+  { plan: GeneratedPlan; outputDir: string; materialVideo?: VideoMetadata; materialSegments?: MaterialSegment[]; remotionDsl?: RemotionCompositionDsl; remotionCode?: string },
   { url: string; path: string }
 > = {
   name: "Remotion Storyboard Renderer",
@@ -118,6 +120,213 @@ export const remotionStoryboardAdapter: ToolProtocol<
     }
   }
 };
+
+export type SeedanceRemotionCoderInput = {
+  source: SourceInput;
+  sample: SampleAnalysis;
+  knowledge: KnowledgeEntry[];
+  materialSegments: MaterialSegment[];
+  plan: GeneratedPlan;
+  iterationIndex: number;
+  rewriteBrief?: string;
+  previousCandidateId?: string;
+};
+
+export type SeedanceRemotionCoderOutput = {
+  provider: "seedance" | "mock";
+  model?: string;
+  dsl?: RemotionCompositionDsl;
+  remotionCode?: string;
+  notes?: string[];
+  error?: string;
+};
+
+export const seedanceRemotionCoderAdapter: ToolProtocol<SeedanceRemotionCoderInput, SeedanceRemotionCoderOutput> = {
+  name: "Seedance Remotion Coder",
+  inputSchema: "{ source, sample, knowledge, materialSegments, plan, iterationIndex, rewriteBrief? }",
+  outputSchema: "{ provider, model?, dsl?, remotionCode?, notes?, error? }",
+  requiredEnv: ["ARK_BASE_URL", "ARK_API_KEY", "ARK_ENDPOINT_ID"],
+  filePermissions: ["OUTPUT_DIR"],
+  timeoutMs: 90_000,
+  fallback: "Return a visibly marked mock Remotion DSL/code artifact that cannot pass formal benchmark.",
+  async run(input) {
+    const dsl = buildFallbackRemotionDsl(input);
+    return {
+      provider: "mock",
+      model: "mock-seedance-remotion-coder",
+      dsl,
+      remotionCode: compileRemotionDslToCode(dsl),
+      notes: ["Mock mode: Seedance Remotion Coder is not configured, so this candidate cannot formally pass benchmark."]
+    };
+  }
+};
+
+export type VisualBenchmarkJudgeInput = {
+  source: SourceInput;
+  sample: SampleAnalysis;
+  knowledge: KnowledgeEntry[];
+  materialSegments: MaterialSegment[];
+  plan: GeneratedPlan;
+  candidateId: string;
+  iterationIndex: number;
+  renderedVideo: { url: string; path: string };
+  remotionDsl: RemotionCompositionDsl;
+  remotionCode: string;
+  previousScore?: BenchmarkScore;
+  rewriteBrief?: string;
+};
+
+export type VisualBenchmarkJudgeOutput = {
+  provider: "ark" | "mock";
+  model?: string;
+  score?: BenchmarkScore;
+  frameEvidence?: Array<{ frameUrl: string; framePath?: string; timestampSec: number; observation: string }>;
+  reasons?: string[];
+  nextRewriteBrief?: string;
+  error?: string;
+};
+
+export const visualBenchmarkJudgeAdapter: ToolProtocol<VisualBenchmarkJudgeInput, VisualBenchmarkJudgeOutput> = {
+  name: "Visual Benchmark Judge",
+  inputSchema: "{ source, sample, materialSegments, candidateId, renderedVideo, remotionDsl, remotionCode }",
+  outputSchema: "{ provider, model?, score?, frameEvidence?, reasons?, nextRewriteBrief?, error? }",
+  requiredEnv: ["ARK_BASE_URL", "ARK_API_KEY", "ARK_ENDPOINT_ID", "FFMPEG_PATH"],
+  filePermissions: ["OUTPUT_DIR"],
+  timeoutMs: 90_000,
+  fallback: "Return an explicit mock-mode failing benchmark instead of pretending the video passed.",
+  async run(input) {
+    return {
+      provider: "mock",
+      model: "mock-visual-benchmark-judge",
+      frameEvidence: [
+        {
+          frameUrl: input.renderedVideo.url,
+          timestampSec: 0,
+          observation: "Mock judge did not inspect rendered frames."
+        }
+      ],
+      reasons: ["Visual Benchmark Judge is not configured."],
+      nextRewriteBrief: "Configure the visual judge model before claiming benchmark pass.",
+      score: createMockVisualBenchmarkScore(input)
+    };
+  }
+};
+
+function buildFallbackRemotionDsl(input: SeedanceRemotionCoderInput): RemotionCompositionDsl {
+  const firstSegmentId = input.materialSegments[0]?.id;
+  const scenes = input.plan.timeline.slice(0, 5).map((item, index) => ({
+    id: `scene-${input.iterationIndex}-${index + 1}`,
+    startSec: item.startSec,
+    endSec: item.endSec,
+    layout: (index === 0 ? "centered_caption" : index === input.plan.timeline.length - 1 ? "cta" : "product_card") as RemotionCompositionDsl["scenes"][number]["layout"],
+    caption: item.caption || `${input.source.productName || "产品"} ${index + 1}`,
+    assetIds: item.assetIds.length ? item.assetIds : firstSegmentId ? [firstSegmentId] : [],
+    motion: (input.iterationIndex > 0 && index === 0 ? "snap_zoom" : item.transition ? "cut" : "slow_push") as RemotionCompositionDsl["scenes"][number]["motion"]
+  }));
+
+  return {
+    version: 1,
+    candidateName: `MockSeedanceCandidate_${input.iterationIndex}`,
+    scenes: scenes.length
+      ? scenes
+      : [
+          {
+            id: `scene-${input.iterationIndex}-fallback`,
+            startSec: 0,
+            endSec: Math.max(6, input.source.targetDurationSec),
+            layout: "centered_caption",
+            caption: input.source.productName || input.source.prompt || "Mock candidate",
+            assetIds: firstSegmentId ? [firstSegmentId] : [],
+            motion: "hold"
+          }
+        ]
+  };
+}
+
+function compileRemotionDslToCode(dsl: RemotionCompositionDsl) {
+  const sceneCode = dsl.scenes
+    .map(
+      (scene) =>
+        `  <Scene id="${scene.id}" from={${scene.startSec}} to={${scene.endSec}} layout="${scene.layout}" motion="${scene.motion}" caption={${JSON.stringify(scene.caption)}} assets={${JSON.stringify(scene.assetIds)}} />`
+    )
+    .join("\n");
+  return [
+    "import { Scene } from '@byteproject/remotion-safe-components';",
+    "",
+    `export function ${sanitizeComponentName(dsl.candidateName)}() {`,
+    "  return (",
+    "    <>",
+    sceneCode,
+    "    </>",
+    "  );",
+    "}"
+  ].join("\n");
+}
+
+function sanitizeComponentName(name: string) {
+  const cleaned = name.replace(/[^A-Za-z0-9_]/g, "_");
+  return /^[A-Za-z_]/.test(cleaned) ? cleaned : `Candidate_${cleaned}`;
+}
+
+function createMockVisualBenchmarkScore(input: VisualBenchmarkJudgeInput): BenchmarkScore {
+  return {
+    candidateId: input.candidateId,
+    iterationIndex: input.iterationIndex,
+    totalScore: 59,
+    grade: "fail",
+    accepted: false,
+    threshold: {
+      regenerateBelow: 60,
+      targetScore: 90,
+      excellentFrom: 95,
+      maxIterations: 5
+    },
+    dimensionScores: [
+      makeVisualDimension("user_brief_alignment", "用户需求和商品表达", 25, 12, "Mock judge cannot validate brief alignment from frames."),
+      makeVisualDimension("uploaded_video_usage", "上传视频结构和素材利用", 20, 8, "Mock judge cannot prove source footage use."),
+      makeVisualDimension("hook_retention", "前 3 秒 hook、节奏和留存", 20, 10, "Mock judge cannot inspect opening frames."),
+      makeVisualDimension("visual_packaging", "画面包装、字幕、转场和可看性", 15, 8, "Mock judge cannot inspect visual packaging."),
+      makeVisualDimension("remotion_code_delta", "Remotion 代码变化真实有效", 10, 6, "Mock coder output is not a formal Seedance result."),
+      makeVisualDimension("safety_compliance", "安全合规", 10, 10, "No sensitive content was exposed in mock score.")
+    ],
+    hardFailures: [
+      {
+        code: "mock_mode",
+        maxAllowedScore: 59,
+        reason: "Seedance or Visual Benchmark Judge is running in mock mode, so the candidate cannot formally pass."
+      }
+    ],
+    topFixes: ["Configure Seedance Remotion Coder and Visual Benchmark Judge before formal acceptance."],
+    revisionBrief: {
+      task: "revise_video_plan_from_benchmark",
+      targetScore: 90,
+      currentScore: 59,
+      failedDimensions: [
+        {
+          dimension: "uploaded_video_usage",
+          score: 8,
+          reason: "Mock judge cannot prove source footage use.",
+          instruction: "Run visual frame judging against the rendered MP4."
+        }
+      ],
+      mustKeep: ["Use the uploaded video as both structure reference and available material pool."],
+      mustAvoid: ["Do not mark mock candidates as benchmark-passing production output."],
+      rewriteScope: ["rendererPrompt", "timeline captions", "packaging", "transition", "beatHint"]
+    }
+  };
+}
+
+function makeVisualDimension(id: BenchmarkScore["dimensionScores"][number]["id"], label: string, maxScore: number, score: number, reason: string) {
+  return {
+    id,
+    label,
+    maxScore,
+    score,
+    evidence: [reason],
+    deductions: score >= maxScore ? [] : [reason],
+    fixInstruction: reason
+  };
+}
 
 export type ModelVideoUnderstandingInput = {
   video: VideoMetadata;

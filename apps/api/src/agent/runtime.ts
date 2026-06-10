@@ -1,4 +1,4 @@
-import { modelCreativeAdapter, modelPlanComposerAdapter, modelVideoUnderstandingAdapter, remotionStoryboardAdapter } from "@byteproject/adapters";
+import { modelCreativeAdapter, modelPlanComposerAdapter, modelVideoUnderstandingAdapter, remotionStoryboardAdapter, seedanceRemotionCoderAdapter, visualBenchmarkJudgeAdapter } from "@byteproject/adapters";
 import { knowledgeStore, seedKnowledge } from "@byteproject/knowledge";
 import type { KnowledgeEntry } from "@byteproject/shared";
 import { callToolCallingModel, canUseToolCallingModel } from "./modelToolClient";
@@ -8,6 +8,8 @@ export type AgentRuntime = {
   creativeModel: Pick<typeof modelCreativeAdapter, "run">;
   planComposer: Pick<typeof modelPlanComposerAdapter, "run">;
   renderer: Pick<typeof remotionStoryboardAdapter, "run">;
+  remotionCoder: Pick<typeof seedanceRemotionCoderAdapter, "run">;
+  visualJudge: Pick<typeof visualBenchmarkJudgeAdapter, "run">;
   knowledge: Pick<typeof knowledgeStore, "add" | "retrieve" | "list">;
   seedKnowledge: KnowledgeEntry[];
   canUseToolCallingModel: () => boolean;
@@ -19,6 +21,8 @@ export const defaultAgentRuntime: AgentRuntime = {
   creativeModel: modelCreativeAdapter,
   planComposer: modelPlanComposerAdapter,
   renderer: remotionStoryboardAdapter,
+  remotionCoder: seedanceRemotionCoderAdapter,
+  visualJudge: visualBenchmarkJudgeAdapter,
   knowledge: knowledgeStore,
   seedKnowledge,
   canUseToolCallingModel,

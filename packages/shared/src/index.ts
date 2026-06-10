@@ -324,6 +324,47 @@ export type PreviewVariant = {
   promptHint: string;
 };
 
+export type RemotionSceneDsl = {
+  id: string;
+  startSec: number;
+  endSec: number;
+  layout: "centered_caption" | "split_reveal" | "product_card" | "media_clip" | "cta";
+  caption: string;
+  assetIds: string[];
+  motion: "slow_push" | "snap_zoom" | "pan" | "cut" | "hold";
+};
+
+export type RemotionCompositionDsl = {
+  version: 1;
+  candidateName: string;
+  scenes: RemotionSceneDsl[];
+};
+
+export type CandidateRemotionArtifact = {
+  provider: "seedance" | "mock";
+  model?: string;
+  mockMode: boolean;
+  baseDir?: string;
+  inputJsonPath?: string;
+  dslPath?: string;
+  codePath?: string;
+  outputPath?: string;
+  outputUrl?: string;
+  framePaths: string[];
+  frameUrls: string[];
+  codeHash: string;
+  dsl: RemotionCompositionDsl;
+  remotionCode: string;
+  notes: string[];
+};
+
+export type VisualFrameEvidence = {
+  frameUrl: string;
+  framePath?: string;
+  timestampSec: number;
+  observation: string;
+};
+
 export type StoryboardItem = {
   id: string;
   slotId: string;
@@ -356,7 +397,13 @@ export type BenchmarkDimensionId =
   | "retention_rhythm"
   | "visual_packaging_watchability"
   | "asset_gap_handling"
-  | "safety_explainability";
+  | "safety_explainability"
+  | "user_brief_alignment"
+  | "uploaded_video_usage"
+  | "hook_retention"
+  | "visual_packaging"
+  | "remotion_code_delta"
+  | "safety_compliance";
 
 export type BenchmarkDimensionScore = {
   id: BenchmarkDimensionId;
@@ -391,9 +438,9 @@ export type BenchmarkScore = {
   accepted: boolean;
   threshold: {
     regenerateBelow: 60;
-    targetScore: 80;
-    excellentFrom: 85;
-    maxIterations: 3;
+    targetScore: number;
+    excellentFrom: number;
+    maxIterations: number;
   };
   dimensionScores: BenchmarkDimensionScore[];
   hardFailures: Array<{
@@ -402,12 +449,29 @@ export type BenchmarkScore = {
       | "empty_preview"
       | "copied_sample_content"
       | "brief_mismatch"
-      | "sensitive_leak";
+      | "sensitive_leak"
+      | "render_failed"
+      | "invalid_video"
+      | "missing_required_material_use"
+      | "no_remotion_code_delta"
+      | "unsafe_content"
+      | "stagnant_iteration"
+      | "mock_mode";
     maxAllowedScore: number;
     reason: string;
   }>;
   topFixes: string[];
   revisionBrief?: BenchmarkRevisionBrief;
+};
+
+export type VisualBenchmarkReport = {
+  provider: "ark" | "mock";
+  model?: string;
+  mockMode: boolean;
+  score: BenchmarkScore;
+  frameEvidence: VisualFrameEvidence[];
+  reasons: string[];
+  nextRewriteBrief?: string;
 };
 
 export type CandidateIteration = {
@@ -421,6 +485,10 @@ export type CandidateIteration = {
   previewVariants: PreviewVariant[];
   demo: GeneratedPlan["demo"];
   benchmarkScore: BenchmarkScore;
+  remotionArtifact?: CandidateRemotionArtifact;
+  visualBenchmark?: VisualBenchmarkReport;
+  rewriteBrief?: string;
+  isBest?: boolean;
 };
 
 export type RunResult = {

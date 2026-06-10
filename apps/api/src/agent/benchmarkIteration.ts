@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { scoreCandidate } from "@byteproject/core";
-import type { BenchmarkScore, CandidateIteration, GeneratedPlan, SourceInput } from "@byteproject/shared";
+import type { BenchmarkScore, CandidateIteration, CandidateRemotionArtifact, GeneratedPlan, RemotionCompositionDsl, SourceInput, VisualBenchmarkReport } from "@byteproject/shared";
 import { BENCHMARK_MAX_ITERATIONS } from "./constants";
 import { addAnalysisRationale, applyModelEnhancement } from "./planning";
 import { publicModelFailureReason } from "./publicContracts";
@@ -12,6 +15,8 @@ export async function ensureBenchmarkScore(context: AgentContext, trace?: AgentT
     throw new Error("Cannot score incomplete agent context.");
   }
   if (context.benchmarkScore && context.iterations?.length) return;
+
+  if (await runSeedanceCandidateLoop(context, trace, runtime)) return;
 
   const iterations: CandidateIteration[] = [];
   const canAttemptModelRevision = runtime.canUseToolCallingModel();
@@ -109,6 +114,191 @@ export async function ensureBenchmarkScore(context: AgentContext, trace?: AgentT
   context.iterations = iterations;
 }
 
+async function runSeedanceCandidateLoop(context: AgentContext, trace: AgentTraceItem[] | undefined, runtime: AgentRuntime) {
+  if (!context.sample || !context.knowledge || !context.materialSegments || !context.generated) return false;
+
+  const basePlan = cloneJson(context.generated);
+  const iterations: CandidateIteration[] = [];
+  let currentPlan = basePlan;
+  let rewriteBrief: string | undefined;
+  let previousCandidateId: string | undefined;
+  let previousStructuralSignature: string | undefined;
+  let best: { score: BenchmarkScore; plan: GeneratedPlan; index: number } | undefined;
+  let repeatedHardFailure: string | undefined;
+  let repeatedHardFailureCount = 0;
+
+  for (let iterationIndex = 0; iterationIndex < BENCHMARK_MAX_ITERATIONS; iterationIndex += 1) {
+    const candidateId = `${basePlan.id}-candidate-${iterationIndex}`;
+    const coderResult = await runtime.remotionCoder.run({
+      source: context.source,
+      sample: context.sample,
+      knowledge: context.knowledge,
+      materialSegments: context.materialSegments,
+      plan: currentPlan,
+      iterationIndex,
+      rewriteBrief,
+      previousCandidateId
+    });
+
+    if (!coderResult.dsl || !coderResult.remotionCode) {
+      trace?.push({
+        tool: "seedance_remotion_coder",
+        ok: false,
+        input: { candidateId, iterationIndex },
+        observation: { provider: coderResult.provider, error: publicModelFailureReason(coderResult.error ?? "Seedance Remotion Coder did not return code.") }
+      });
+      return false;
+    }
+
+    const codeHash = hashText(coderResult.remotionCode);
+    const structuralSignature = remotionStructuralSignature(coderResult.dsl);
+    const iterationHardFailures: BenchmarkScore["hardFailures"] = previousStructuralSignature && previousStructuralSignature === structuralSignature
+      ? [
+          {
+            code: "no_remotion_code_delta",
+            maxAllowedScore: 60,
+            reason: "Only copy changed; Remotion scene timing, layout, motion, and material mapping stayed the same."
+          },
+          {
+            code: "stagnant_iteration",
+            maxAllowedScore: 60,
+            reason: "Two consecutive candidates are structurally too similar to count as a real iteration."
+          }
+        ]
+      : [];
+
+    const candidatePlan = applyRemotionDslToPlan(currentPlan, coderResult.dsl, candidateId, iterationIndex);
+    const artifactDraft = await persistCandidateDraft({
+      outputDir: context.outputDir,
+      candidateId,
+      input: {
+        source: context.source,
+        rewriteBrief,
+        parentCandidateId: previousCandidateId,
+        planId: currentPlan.id
+      },
+      dsl: coderResult.dsl,
+      remotionCode: coderResult.remotionCode
+    });
+    const preview = await runtime.renderer.run({
+      plan: candidatePlan,
+      outputDir: context.outputDir,
+      materialVideo: context.materialVideo,
+      materialSegments: context.materialSegments,
+      remotionDsl: coderResult.dsl,
+      remotionCode: coderResult.remotionCode
+    });
+    candidatePlan.demo = {
+      status: "rendered",
+      url: preview.url,
+      note: preview.url.endsWith(".mp4") ? "已由 Seedance Remotion Coder 生成代码并渲染候选视频。" : "已生成候选预览。"
+    };
+
+    const judge = await runtime.visualJudge.run({
+      source: context.source,
+      sample: context.sample,
+      knowledge: context.knowledge,
+      materialSegments: context.materialSegments,
+      plan: candidatePlan,
+      candidateId,
+      iterationIndex,
+      renderedVideo: preview,
+      remotionDsl: coderResult.dsl,
+      remotionCode: coderResult.remotionCode,
+      previousScore: best?.score,
+      rewriteBrief
+    });
+
+    if (!judge.score) {
+      trace?.push({
+        tool: "visual_benchmark_judge",
+        ok: false,
+        input: { candidateId, iterationIndex },
+        observation: { provider: judge.provider, error: publicModelFailureReason(judge.error ?? "Visual Benchmark Judge did not return a score.") }
+      });
+      return false;
+    }
+
+    const normalizedScore = normalizeVisualScore(withAdditionalHardFailures(judge.score, iterationHardFailures), coderResult.provider, judge.provider);
+    const visualBenchmark: VisualBenchmarkReport = {
+      provider: judge.provider,
+      model: judge.model,
+      mockMode: coderResult.provider === "mock" || judge.provider === "mock",
+      score: normalizedScore,
+      frameEvidence: judge.frameEvidence ?? [],
+      reasons: judge.reasons ?? normalizedScore.topFixes,
+      nextRewriteBrief: judge.nextRewriteBrief ?? normalizedScore.revisionBrief?.failedDimensions.map((dimension) => dimension.instruction).join("\n")
+    };
+    const remotionArtifact: CandidateRemotionArtifact = {
+      provider: coderResult.provider,
+      model: coderResult.model,
+      mockMode: coderResult.provider === "mock",
+      baseDir: artifactDraft.baseDir,
+      inputJsonPath: artifactDraft.inputJsonPath,
+      dslPath: artifactDraft.dslPath,
+      codePath: artifactDraft.codePath,
+      outputPath: preview.path,
+      outputUrl: preview.url,
+      framePaths: visualBenchmark.frameEvidence.map((frame) => frame.framePath).filter((framePath): framePath is string => Boolean(framePath)),
+      frameUrls: visualBenchmark.frameEvidence.map((frame) => frame.frameUrl),
+      codeHash,
+      dsl: coderResult.dsl,
+      remotionCode: coderResult.remotionCode,
+      notes: coderResult.notes ?? []
+    };
+
+    await persistCandidateScore(artifactDraft.baseDir, normalizedScore, visualBenchmark);
+    const snapshot = snapshotCandidateIteration(candidatePlan, normalizedScore, iterationIndex, {
+      parentCandidateId: previousCandidateId,
+      remotionArtifact,
+      visualBenchmark,
+      rewriteBrief
+    });
+    iterations.push(snapshot);
+
+    trace?.push({
+      tool: "seedance_candidate_iteration",
+      ok: normalizedScore.accepted,
+      input: { candidateId, iterationIndex },
+      observation: {
+        coder: coderResult.provider,
+        judge: judge.provider,
+        score: normalizedScore.totalScore,
+        accepted: normalizedScore.accepted,
+        hardFailures: normalizedScore.hardFailures.map((failure) => failure.code),
+        outputUrl: preview.url
+      }
+    });
+
+    if (!best || normalizedScore.totalScore > best.score.totalScore) {
+      best = { score: normalizedScore, plan: candidatePlan, index: iterations.length - 1 };
+    }
+
+    const firstHardFailure = normalizedScore.hardFailures[0]?.code;
+    if (firstHardFailure && firstHardFailure === repeatedHardFailure) {
+      repeatedHardFailureCount += 1;
+    } else {
+      repeatedHardFailure = firstHardFailure;
+      repeatedHardFailureCount = firstHardFailure ? 1 : 0;
+    }
+
+    previousStructuralSignature = structuralSignature;
+    if (normalizedScore.accepted || repeatedHardFailureCount >= 2) break;
+    rewriteBrief = visualBenchmark.nextRewriteBrief;
+    previousCandidateId = candidateId;
+    currentPlan = candidatePlan;
+  }
+
+  if (!iterations.length || !best) return false;
+  context.generated = best.plan;
+  context.benchmarkScore = best.score;
+  context.iterations = iterations.map((iteration, index) => ({
+    ...iteration,
+    isBest: index === best.index
+  }));
+  return true;
+}
+
 export async function renderCurrentCandidate(context: AgentContext, note: string, runtime: AgentRuntime = defaultAgentRuntime) {
   if (!context.generated) throw new Error("Cannot render without a generated plan.");
   const preview = await runtime.renderer.run({
@@ -124,9 +314,20 @@ export async function renderCurrentCandidate(context: AgentContext, note: string
   };
 }
 
-function snapshotCandidateIteration(generated: GeneratedPlan, benchmarkScore: BenchmarkScore, iterationIndex: number): CandidateIteration {
+function snapshotCandidateIteration(
+  generated: GeneratedPlan,
+  benchmarkScore: BenchmarkScore,
+  iterationIndex: number,
+  extras: {
+    parentCandidateId?: string;
+    remotionArtifact?: CandidateRemotionArtifact;
+    visualBenchmark?: VisualBenchmarkReport;
+    rewriteBrief?: string;
+  } = {}
+): CandidateIteration {
   return cloneJson({
     candidateId: generated.id,
+    parentCandidateId: extras.parentCandidateId,
     iterationIndex,
     script: generated.script,
     storyboard: generated.storyboard,
@@ -134,8 +335,151 @@ function snapshotCandidateIteration(generated: GeneratedPlan, benchmarkScore: Be
     timeline: generated.timeline,
     previewVariants: generated.previewVariants,
     demo: generated.demo,
-    benchmarkScore
+    benchmarkScore,
+    remotionArtifact: extras.remotionArtifact,
+    visualBenchmark: extras.visualBenchmark,
+    rewriteBrief: extras.rewriteBrief
   });
+}
+
+function applyRemotionDslToPlan(plan: GeneratedPlan, dsl: RemotionCompositionDsl, candidateId: string, iterationIndex: number): GeneratedPlan {
+  const next = cloneJson(plan);
+  next.id = candidateId;
+  next.compositionPlan.id = `${plan.compositionPlan.id}-candidate-${iterationIndex}`;
+  next.timeline = next.timeline.map((item, index) => {
+    const scene = dsl.scenes[index];
+    if (!scene) return item;
+    return {
+      ...item,
+      startSec: scene.startSec,
+      endSec: scene.endSec,
+      assetIds: scene.assetIds,
+      caption: scene.caption || item.caption,
+      packaging: uniqueText([...item.packaging, scene.layout, scene.motion]),
+      transition: scene.motion === "snap_zoom" ? "快速推近切入" : scene.motion === "cut" ? "顺切" : item.transition || "轻推过渡",
+      beatHint: scene.motion === "snap_zoom" ? "前 3 秒重拍卡点" : item.beatHint || "按场景节奏切换"
+    };
+  });
+  next.storyboard = next.storyboard.map((item, index) => {
+    const scene = dsl.scenes[index];
+    if (!scene) return item;
+    return {
+      ...item,
+      title: `${dsl.candidateName} ${index + 1}`,
+      visual: `Remotion scene ${scene.layout} with ${scene.motion}.`,
+      caption: scene.caption || item.caption,
+      reason: "Seedance Remotion Coder generated this scene from the current brief and visual judge feedback."
+    };
+  });
+  next.script = next.timeline.map((item) => item.caption).join("\n");
+  next.rendererPrompt = [
+    next.rendererPrompt,
+    `Candidate ${iterationIndex}: render DSL ${dsl.candidateName} with ${dsl.scenes.length} scenes.`
+  ].filter(Boolean).join("\n");
+  next.compositionPlan.rationale = [
+    `Seedance Remotion Coder 生成受限 DSL：${dsl.candidateName}。`,
+    ...next.compositionPlan.rationale
+  ].slice(0, 5);
+  return next;
+}
+
+async function persistCandidateDraft(input: {
+  outputDir: string;
+  candidateId: string;
+  input: unknown;
+  dsl: RemotionCompositionDsl;
+  remotionCode: string;
+}) {
+  const baseDir = join(input.outputDir, "candidates", input.candidateId);
+  await mkdir(baseDir, { recursive: true });
+  const inputJsonPath = join(baseDir, "input.json");
+  const dslPath = join(baseDir, "remotion.dsl.json");
+  const codePath = join(baseDir, "Composition.tsx");
+  await Promise.all([
+    writeFile(inputJsonPath, JSON.stringify(input.input, null, 2), "utf8"),
+    writeFile(dslPath, JSON.stringify(input.dsl, null, 2), "utf8"),
+    writeFile(codePath, input.remotionCode, "utf8")
+  ]);
+  return { baseDir, inputJsonPath, dslPath, codePath };
+}
+
+async function persistCandidateScore(baseDir: string, score: BenchmarkScore, report: VisualBenchmarkReport) {
+  await writeFile(
+    join(baseDir, "score.json"),
+    JSON.stringify(
+      {
+        score,
+        provider: report.provider,
+        mockMode: report.mockMode,
+        reasons: report.reasons,
+        frameEvidence: report.frameEvidence,
+        nextRewriteBrief: report.nextRewriteBrief
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+}
+
+function withAdditionalHardFailures(score: BenchmarkScore, hardFailures: BenchmarkScore["hardFailures"]): BenchmarkScore {
+  if (!hardFailures.length) return score;
+  const seen = new Set(score.hardFailures.map((failure) => failure.code));
+  return {
+    ...score,
+    hardFailures: [
+      ...score.hardFailures,
+      ...hardFailures.filter((failure) => {
+        if (seen.has(failure.code)) return false;
+        seen.add(failure.code);
+        return true;
+      })
+    ]
+  };
+}
+
+function normalizeVisualScore(score: BenchmarkScore, coderProvider: "seedance" | "mock", judgeProvider: "ark" | "mock"): BenchmarkScore {
+  if (coderProvider !== "mock" && judgeProvider !== "mock") return enforceAcceptance(score);
+  const totalScore = Math.min(score.totalScore, 59);
+  const mockModeFailure = score.hardFailures.some((failure) => failure.code === "mock_mode")
+    ? []
+    : [{
+      code: "mock_mode" as const,
+      maxAllowedScore: 59,
+      reason: "Seedance Remotion Coder or Visual Benchmark Judge is in mock mode; this candidate cannot formally pass."
+    }];
+  return enforceAcceptance({
+    ...score,
+    totalScore,
+    hardFailures: [...score.hardFailures, ...mockModeFailure],
+    topFixes: score.topFixes.length ? score.topFixes : ["Configure production Seedance coder and visual judge before formal acceptance."]
+  });
+}
+
+function enforceAcceptance(score: BenchmarkScore): BenchmarkScore {
+  const accepted = score.totalScore >= score.threshold.targetScore && score.hardFailures.length === 0;
+  const grade: BenchmarkScore["grade"] = accepted
+    ? score.totalScore >= score.threshold.excellentFrom ? "excellent" : "pass"
+    : score.totalScore < score.threshold.regenerateBelow ? "fail" : "needs_iteration";
+  return {
+    ...score,
+    accepted,
+    grade
+  };
+}
+
+function hashText(value: string) {
+  return createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+function remotionStructuralSignature(dsl: RemotionCompositionDsl) {
+  return hashText(JSON.stringify(dsl.scenes.map((scene) => ({
+    startSec: scene.startSec,
+    endSec: scene.endSec,
+    layout: scene.layout,
+    assetIds: scene.assetIds,
+    motion: scene.motion
+  }))));
 }
 
 function applyBenchmarkRevision(generated: GeneratedPlan, source: SourceInput, score: BenchmarkScore, iterationNumber: number) {

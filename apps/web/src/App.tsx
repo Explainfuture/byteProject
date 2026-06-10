@@ -756,16 +756,65 @@ function CandidateIterationRail(props: { iterations: RunResult["iterations"]; fi
               <footer>
                 <div>
                   <strong>第 {iteration.iterationIndex + 1} 轮</strong>
-                  <span>{isFinal ? "当前输出" : "已评估"}</span>
+                  <span>{iteration.visualBenchmark?.score.accepted ? "通过 benchmark" : isFinal ? "当前最佳" : "已评估"}</span>
                 </div>
                 <b>{iteration.benchmarkScore.totalScore}/100</b>
               </footer>
+              <p className="candidate-reason">{candidatePrimaryReason(iteration)}</p>
+              {iteration.remotionArtifact || iteration.visualBenchmark ? (
+                <details className="candidate-evidence">
+                  <summary>查看生成证据</summary>
+                  <div>
+                    {iteration.remotionArtifact ? (
+                      <section>
+                        <span>Remotion</span>
+                        <strong>{iteration.remotionArtifact.provider === "mock" ? "模拟模式" : iteration.remotionArtifact.model ?? "Seedance Remotion Coder"}</strong>
+                        <code>{iteration.remotionArtifact.codeHash}</code>
+                        <pre>{truncateEvidence(iteration.remotionArtifact.remotionCode)}</pre>
+                      </section>
+                    ) : null}
+                    {iteration.visualBenchmark ? (
+                      <section>
+                        <span>Judge</span>
+                        <strong>{iteration.visualBenchmark.mockMode ? "模拟评审" : iteration.visualBenchmark.model ?? "Visual Benchmark Judge"}</strong>
+                        <p>{iteration.visualBenchmark.reasons[0] ?? "已完成视觉评审。"}</p>
+                        {iteration.visualBenchmark.frameEvidence.length ? (
+                          <ul>
+                            {iteration.visualBenchmark.frameEvidence.slice(0, 3).map((frame) => (
+                              <li key={`${frame.frameUrl}-${frame.timestampSec}`}>
+                                {frame.timestampSec}s · {frame.observation}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </section>
+                    ) : null}
+                    {iteration.visualBenchmark?.nextRewriteBrief ? (
+                      <section>
+                        <span>下一轮 brief</span>
+                        <p>{iteration.visualBenchmark.nextRewriteBrief}</p>
+                      </section>
+                    ) : null}
+                  </div>
+                </details>
+              ) : null}
             </article>
           );
         })}
       </div>
     </section>
   );
+}
+
+function candidatePrimaryReason(iteration: RunResult["iterations"][number]) {
+  if (iteration.visualBenchmark?.score.hardFailures.length) return iteration.visualBenchmark.score.hardFailures[0].reason;
+  if (iteration.visualBenchmark?.reasons.length) return iteration.visualBenchmark.reasons[0];
+  if (iteration.benchmarkScore.hardFailures.length) return iteration.benchmarkScore.hardFailures[0].reason;
+  return iteration.benchmarkScore.topFixes[0] ?? iteration.demo?.note ?? "已完成本轮候选评估。";
+}
+
+function truncateEvidence(value: string) {
+  return value.length > 520 ? `${value.slice(0, 520)}...` : value;
 }
 
 function VideoPreviewOverlay(props: { label: string; title: string; detail: string }) {

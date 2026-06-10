@@ -10,7 +10,8 @@ page.setDefaultTimeout(120_000);
 page.setDefaultNavigationTimeout(120_000);
 
 await page.addInitScript(() => window.localStorage.removeItem("byteproject:migration-history"));
-await page.goto("http://localhost:5173", { waitUntil: "networkidle" });
+await page.goto("http://localhost:5173", { waitUntil: "domcontentloaded" });
+await page.locator(".workbench-shell").waitFor({ state: "visible" });
 
 const generateButtonName = "发送给主智能体";
 const startTitle = await page.locator(".input-panel .section-heading strong").first().innerText();
@@ -88,13 +89,20 @@ const modelEnhanced = generationRationale.some(
 const agentMode = generateJson?.agentMode ?? "missing";
 const agentTraceCount = Array.isArray(generateJson?.agentTrace) ? generateJson.agentTrace.length : 0;
 const benchmarkScore = generateJson?.benchmarkScore?.totalScore;
-if (typeof benchmarkScore !== "number" || !Array.isArray(generateJson?.benchmarkScore?.dimensionScores) || generateJson.benchmarkScore.dimensionScores.length !== 7) {
+const benchmarkDimensionApiCount = Array.isArray(generateJson?.benchmarkScore?.dimensionScores) ? generateJson.benchmarkScore.dimensionScores.length : 0;
+if (typeof benchmarkScore !== "number" || benchmarkDimensionApiCount < 6) {
   throw new Error("Generated result is missing a complete benchmarkScore.");
 }
 const iterationCount = Array.isArray(generateJson?.iterations) ? generateJson.iterations.length : 0;
 const iterationsWithDemo = Array.isArray(generateJson?.iterations) ? generateJson.iterations.filter((iteration) => iteration?.demo?.url).length : 0;
 if (iterationCount < 1 || iterationsWithDemo < 1) {
   throw new Error(`Generated result is missing per-iteration video output. iterations=${iterationCount}, demos=${iterationsWithDemo}`);
+}
+const iterationsWithRemotionArtifacts = Array.isArray(generateJson?.iterations)
+  ? generateJson.iterations.filter((iteration) => iteration?.remotionArtifact?.remotionCode && iteration?.remotionArtifact?.dsl && iteration?.visualBenchmark?.score).length
+  : 0;
+if (iterationsWithRemotionArtifacts < iterationCount) {
+  throw new Error(`Generated result did not persist per-iteration Remotion/Judge evidence. iterations=${iterationCount}, artifacts=${iterationsWithRemotionArtifacts}`);
 }
 await page.locator(".result-shell").waitFor({ state: "visible" });
 await assertBodyTextClean(page, "result");
@@ -107,6 +115,8 @@ const agentToolCallCount = await page.locator(".agent-tool-call").count();
 const userAgentBubbleCount = await page.locator(".chat-row.user .agent-bubble").count();
 const candidateIterationCardCount = await page.locator(".candidate-iteration-grid article").count();
 const candidateIterationVideoCount = await page.locator(".candidate-iteration-grid video").count();
+const candidateReasonCount = await page.locator(".candidate-reason").count();
+const candidateEvidenceCount = await page.locator(".candidate-evidence").count();
 const adaptiveVideoClasses = await page.locator(".adaptive-video-frame").evaluateAll((nodes) => nodes.map((node) => node.className));
 const landscapeVideoFrameCount = adaptiveVideoClasses.filter((className) => className.includes("landscape")).length;
 if (demoTitleCount < 1 || generatedVideoCount < 1) {
@@ -119,6 +129,9 @@ if (videoAgentPanelCount !== 1 || agentToolCallCount !== 1 || naturalLanguageInp
 }
 if (candidateIterationCardCount < 1 || candidateIterationVideoCount < 1) {
   throw new Error(`每轮生成视频没有展示。cards=${candidateIterationCardCount}, videos=${candidateIterationVideoCount}`);
+}
+if (candidateReasonCount < candidateIterationCardCount || candidateEvidenceCount < candidateIterationCardCount) {
+  throw new Error(`候选证据没有完整展示。reasons=${candidateReasonCount}, evidence=${candidateEvidenceCount}, cards=${candidateIterationCardCount}`);
 }
 
 await page.locator(".result-nav button", { hasText: "评分" }).click();
@@ -194,8 +207,10 @@ const result = {
   agentMode,
   agentTraceCount,
   benchmarkScore,
+  benchmarkDimensionApiCount,
   iterationCount,
   iterationsWithDemo,
+  iterationsWithRemotionArtifacts,
   benchmarkDimensionCount,
   demoTitleCount,
   generatedVideoCount,
@@ -205,6 +220,8 @@ const result = {
   userAgentBubbleCount,
   candidateIterationCardCount,
   candidateIterationVideoCount,
+  candidateReasonCount,
+  candidateEvidenceCount,
   mappingRowCount,
   diagnosisCardCount,
   lightTimelineTrackCount,
@@ -220,6 +237,7 @@ const result = {
 
 await writeFile(resolve("data/tmp/ui-verification.json"), JSON.stringify(result, null, 2), "utf8");
 console.log(JSON.stringify(result));
+process.exit(0);
 
 async function assertBodyTextClean(page, stage) {
   const text = await page.locator("body").innerText();
