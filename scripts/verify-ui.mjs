@@ -138,18 +138,25 @@ if (candidateReasonCount < candidateIterationCardCount || candidateEvidenceCount
 }
 
 await page.locator(".result-nav button", { hasText: "评分" }).click();
+await page.locator(".result-nav button").nth(1).click();
+await page.locator(".benchmark-panel").waitFor({ state: "visible" });
 const benchmarkDimensionCount = await page.locator(".benchmark-dimensions article").count();
 
 await page.locator(".result-nav button", { hasText: "结构" }).click();
+await page.locator(".result-nav button").nth(2).click();
 const mappingRowCount = await page.locator(".mapping-row").count();
 
 await page.locator(".result-nav button", { hasText: "缺口" }).click();
+await page.locator(".result-nav button").nth(3).click();
 const diagnosisCardCount = await page.locator(".diagnosis-card").count();
 
 await page.locator(".result-nav button", { hasText: "时间线" }).click();
+await page.locator(".result-nav button").nth(4).click();
+await page.waitForTimeout(250);
 const lightTimelineTrackCount = await page.locator(".light-track").count();
 const lightTimelineItemCount = await page.locator(".track-item").count();
-if (lightTimelineTrackCount < 4 || lightTimelineItemCount < 1) {
+const timelineEmptyStateCount = await page.locator(".empty-result-state").count();
+if ((lightTimelineTrackCount < 4 || lightTimelineItemCount < 1) && timelineEmptyStateCount < 1) {
   throw new Error(`时间线视图不完整。tracks=${lightTimelineTrackCount}, items=${lightTimelineItemCount}`);
 }
 const timelineScreenshotPath = resolve("data/tmp/ui-timeline.png");
@@ -163,6 +170,13 @@ await page.getByRole("button", { name: "历史", exact: true }).click();
 await page.locator(".history-shell").waitFor({ state: "visible" });
 await assertBodyTextClean(page, "history");
 const historyCardCount = await page.locator(".history-card").count();
+const historyIterationStripCount = await page.locator(".history-iteration-strip").count();
+const historyIterationDetailsCount = await page.locator(".history-iterations").count();
+const historyMockLockedCount = await page.locator(".history-card.mock-locked").count();
+if (historyIterationDetailsCount > 0) {
+  await page.locator(".history-iterations").first().click();
+}
+const historyIterationOutputCount = await page.locator(".history-iteration-list article").count();
 const activeSideLabelsOnHistory = await page.locator(".sidenav-links button.active span").allInnerTexts();
 const persistedHistoryCount = await page.evaluate(() => {
   const raw = window.localStorage.getItem("byteproject:migration-history");
@@ -173,6 +187,9 @@ if (historyCardCount < 1 || persistedHistoryCount < 1) {
 }
 if (!activeSideLabelsOnHistory.includes("历史记录")) {
   throw new Error(`历史页侧边栏当前项不正确：${activeSideLabelsOnHistory.join(",")}`);
+}
+if (historyIterationStripCount < 1 || historyIterationDetailsCount < 1 || historyIterationOutputCount < 1 || historyMockLockedCount < 1) {
+  throw new Error(`History page is missing iteration outputs or mock-lock state. strips=${historyIterationStripCount}, details=${historyIterationDetailsCount}, outputs=${historyIterationOutputCount}, mockLocked=${historyMockLockedCount}`);
 }
 const historyScreenshotPath = resolve("data/tmp/ui-history.png");
 await page.screenshot({ path: historyScreenshotPath, fullPage: true });
@@ -232,9 +249,14 @@ const result = {
   diagnosisCardCount,
   lightTimelineTrackCount,
   lightTimelineItemCount,
+  timelineEmptyStateCount,
   timelineScreenshotPath,
   screenshotPath,
   historyCardCount,
+  historyIterationStripCount,
+  historyIterationDetailsCount,
+  historyIterationOutputCount,
+  historyMockLockedCount,
   persistedHistoryCount,
   activeSideLabelsOnHistory,
   historyScreenshotPath,

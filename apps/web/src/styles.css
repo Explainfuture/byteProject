@@ -2820,6 +2820,122 @@ body {
   background: var(--bg);
 }
 
+.history-iteration-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.history-iteration-strip span {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 720;
+}
+
+.history-iteration-strip.mock span:last-child {
+  border-color: rgba(180, 83, 9, 0.28);
+  background: rgba(255, 241, 221, 0.88);
+  color: var(--accent);
+}
+
+.history-iterations {
+  border: 1px solid rgba(180, 83, 9, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 253, 249, 0.72);
+}
+
+.history-iterations summary {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.history-iterations summary::-webkit-details-marker {
+  display: none;
+}
+
+.history-iteration-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.history-iteration-list article {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.history-iteration-list header,
+.history-iteration-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.history-iteration-list header span {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.history-iteration-list header strong {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.history-iteration-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.history-iteration-actions a,
+.history-iteration-actions span {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.history-iteration-list p {
+  min-height: 0;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.history-iteration-list small {
+  color: var(--muted-2);
+  font-size: 11px;
+  font-weight: 650;
+}
+
 .history-score {
   align-items: flex-end;
   margin-top: auto;

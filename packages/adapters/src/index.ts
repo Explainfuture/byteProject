@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_FRAME_BUDGET, creativeReconstructionSkills, frameSampleCountForDuration, normalizeFrameBudget } from "@byteproject/shared";
 import type {
@@ -150,14 +150,14 @@ export const seedanceRemotionCoderAdapter: ToolProtocol<SeedanceRemotionCoderInp
   timeoutMs: 90_000,
   fallback: "Return a visibly marked mock Remotion DSL/code artifact that cannot pass formal benchmark.",
   async run(input) {
-    const dsl = buildFallbackRemotionDsl(input);
-    return {
-      provider: "mock",
-      model: "mock-seedance-remotion-coder",
-      dsl,
-      remotionCode: compileRemotionDslToCode(dsl),
-      notes: ["Mock mode: Seedance Remotion Coder is not configured, so this candidate cannot formally pass benchmark."]
-    };
+    const model = process.env.SEEDANCE_REMOTION_MODEL || process.env.ARK_ENDPOINT_ID || process.env.ARK_MODEL;
+    if (!canUseArkModel(model)) return buildMockSeedanceRemotionOutput(input, "Seedance Remotion Coder is not configured.");
+
+    try {
+      return await requestSeedanceRemotionCode(input, model);
+    } catch (error) {
+      return buildMockSeedanceRemotionOutput(input, error instanceof Error ? error.message : "Seedance Remotion Coder request failed.");
+    }
   }
 };
 
@@ -195,22 +195,279 @@ export const visualBenchmarkJudgeAdapter: ToolProtocol<VisualBenchmarkJudgeInput
   timeoutMs: 90_000,
   fallback: "Return an explicit mock-mode failing benchmark instead of pretending the video passed.",
   async run(input) {
-    return {
-      provider: "mock",
-      model: "mock-visual-benchmark-judge",
-      frameEvidence: [
-        {
-          frameUrl: input.renderedVideo.url,
-          timestampSec: 0,
-          observation: "Mock judge did not inspect rendered frames."
-        }
-      ],
-      reasons: ["Visual Benchmark Judge is not configured."],
-      nextRewriteBrief: "Configure the visual judge model before claiming benchmark pass.",
-      score: createMockVisualBenchmarkScore(input)
-    };
+    const model = process.env.VISUAL_JUDGE_MODEL || process.env.ARK_ENDPOINT_ID || process.env.ARK_MODEL;
+    if (!canUseArkModel(model)) return buildMockVisualJudgeOutput(input, "Visual Benchmark Judge is not configured.");
+
+    try {
+      const frames = await sampleRenderedVideoEvidenceFrames(input.renderedVideo.path, input.renderedVideo.url, input.candidateId);
+      if (!frames.length) return buildMockVisualJudgeOutput(input, "Visual Benchmark Judge could not extract rendered frames.");
+      return await requestVisualBenchmarkJudgement(input, model, frames);
+    } catch (error) {
+      return buildMockVisualJudgeOutput(input, error instanceof Error ? error.message : "Visual Benchmark Judge request failed.");
+    }
   }
 };
+
+function canUseArkModel(model: string | undefined): model is string {
+  if ((process.env.LLM_PROVIDER ?? "ark") !== "ark") return false;
+  const apiKey = process.env.ARK_API_KEY;
+  return Boolean(apiKey && apiKey !== "replace_me" && model && model !== "replace_me");
+}
+
+function buildMockSeedanceRemotionOutput(input: SeedanceRemotionCoderInput, reason?: string): SeedanceRemotionCoderOutput {
+  const dsl = buildFallbackRemotionDsl(input);
+  return {
+    provider: "mock",
+    model: "mock-seedance-remotion-coder",
+    dsl,
+    remotionCode: compileRemotionDslToCode(dsl),
+    notes: [
+      reason ?? "Mock mode: Seedance Remotion Coder is not configured.",
+      "Mock mode: Seedance Remotion Coder is not configured, so this candidate cannot formally pass benchmark."
+    ],
+    error: reason
+  };
+}
+
+function buildMockVisualJudgeOutput(input: VisualBenchmarkJudgeInput, reason?: string): VisualBenchmarkJudgeOutput {
+  const displayReason = reason ?? "Visual Benchmark Judge is not configured.";
+  return {
+    provider: "mock",
+    model: "mock-visual-benchmark-judge",
+    frameEvidence: [
+      {
+        frameUrl: input.renderedVideo.url,
+        timestampSec: 0,
+        observation: "Mock judge did not inspect rendered frames."
+      }
+    ],
+    reasons: [displayReason],
+    nextRewriteBrief: "Configure the visual judge model before claiming benchmark pass.",
+    score: createMockVisualBenchmarkScore(input)
+  };
+}
+
+async function requestSeedanceRemotionCode(input: SeedanceRemotionCoderInput, model: string): Promise<SeedanceRemotionCoderOutput> {
+  const response = await requestArkChatContent(
+    model,
+    buildSeedanceRemotionMessages(input),
+    90_000,
+    2600,
+    0.35
+  );
+  const parsed = parseJsonObject(response) as {
+    dsl?: unknown;
+    remotionCode?: unknown;
+    notes?: unknown;
+  };
+  const dsl = normalizeRemotionDsl(parsed.dsl, input);
+  const remotionCode = typeof parsed.remotionCode === "string" && parsed.remotionCode.trim()
+    ? parsed.remotionCode.trim()
+    : compileRemotionDslToCode(dsl);
+  return {
+    provider: "seedance",
+    model,
+    dsl,
+    remotionCode,
+    notes: cleanStringList(parsed.notes) ?? []
+  };
+}
+
+function buildSeedanceRemotionMessages(input: SeedanceRemotionCoderInput) {
+  return [
+    {
+      role: "system",
+      content:
+        "You are Seedance 2.0 Lite acting as a Remotion code subagent. Rewrite the current video plan into a fresh Remotion composition candidate. Return strict JSON only. Do not copy source-video content verbatim; transfer structure, pacing, slots, and packaging. Each iteration must make a real structural change when rewriteBrief is present."
+    },
+    {
+      role: "user",
+      content: JSON.stringify({
+        task: "Generate a Remotion candidate DSL and code for this iteration.",
+        iterationIndex: input.iterationIndex,
+        previousCandidateId: input.previousCandidateId,
+        rewriteBrief: input.rewriteBrief,
+        source: input.source,
+        extractedSample: {
+          summary: input.sample.summary,
+          slots: input.sample.slots,
+          rhythmPattern: input.sample.rhythmPattern,
+          packagingPattern: input.sample.packagingPattern
+        },
+        materialSegments: input.materialSegments,
+        currentPlan: {
+          id: input.plan.id,
+          script: input.plan.script,
+          timeline: input.plan.timeline,
+          rendererPrompt: input.plan.rendererPrompt,
+          rationale: input.plan.compositionPlan.rationale
+        },
+        outputSchema: {
+          dsl: {
+            version: 1,
+            candidateName: "string",
+            scenes: [
+              {
+                id: "string",
+                startSec: "number",
+                endSec: "number",
+                layout: "centered_caption | split_reveal | product_card | media_clip | cta",
+                caption: "short caption",
+                assetIds: ["material segment ids"],
+                motion: "slow_push | snap_zoom | pan | cut | hold"
+              }
+            ]
+          },
+          remotionCode: "TypeScript React component code using the DSL scene sequence",
+          notes: ["short implementation notes"]
+        }
+      })
+    }
+  ];
+}
+
+type RenderedEvidenceFrame = {
+  frameUrl: string;
+  framePath: string;
+  timestampSec: number;
+  base64: string;
+};
+
+type JudgeFrameEvidence = NonNullable<VisualBenchmarkJudgeOutput["frameEvidence"]>[number];
+
+async function sampleRenderedVideoEvidenceFrames(filePath: string, renderedVideoUrl: string, candidateId: string): Promise<RenderedEvidenceFrame[]> {
+  const ffmpeg = resolveFfmpegPath();
+  const frameCount = 6;
+  const outputDir = join(dirname(filePath), "candidates", candidateId, "frames");
+  await rm(outputDir, { recursive: true, force: true });
+  await mkdir(outputDir, { recursive: true });
+  await execJson(ffmpeg, [
+    "-y",
+    "-i",
+    filePath,
+    "-vf",
+    `fps=1/3,scale='min(480,iw)':-2`,
+    "-frames:v",
+    String(frameCount),
+    "-q:v",
+    "4",
+    join(outputDir, "frame-%03d.jpg")
+  ]);
+  const files = (await readdir(outputDir)).filter((file) => file.endsWith(".jpg")).sort().slice(0, frameCount);
+  const publicBase = renderedVideoUrl.replace(/\/[^/]+$/, `/candidates/${candidateId}/frames`);
+  return Promise.all(files.map(async (file, index) => ({
+    frameUrl: `${publicBase}/${file}`,
+    framePath: join(outputDir, file),
+    timestampSec: index * 3,
+    base64: (await readFile(join(outputDir, file))).toString("base64")
+  })));
+}
+
+async function requestVisualBenchmarkJudgement(
+  input: VisualBenchmarkJudgeInput,
+  model: string,
+  frames: RenderedEvidenceFrame[]
+): Promise<VisualBenchmarkJudgeOutput> {
+  const content = await requestArkChatContent(
+    model,
+    buildVisualBenchmarkMessages(input, frames),
+    90_000,
+    2200,
+    0.2
+  );
+  const parsed = parseJsonObject(content) as {
+    score?: unknown;
+    frameEvidence?: unknown;
+    reasons?: unknown;
+    nextRewriteBrief?: unknown;
+  };
+  const score = normalizeJudgeScore(parsed.score, input);
+  const frameEvidence = normalizeFrameEvidence(parsed.frameEvidence, frames);
+  const reasons = cleanStringList(parsed.reasons) ?? score.topFixes;
+  return {
+    provider: "ark",
+    model,
+    score,
+    frameEvidence,
+    reasons,
+    nextRewriteBrief: typeof parsed.nextRewriteBrief === "string" ? parsed.nextRewriteBrief : score.revisionBrief?.failedDimensions.map((dimension) => dimension.instruction).join("\n")
+  };
+}
+
+function buildVisualBenchmarkMessages(input: VisualBenchmarkJudgeInput, frames: RenderedEvidenceFrame[]) {
+  return [
+    {
+      role: "system",
+      content:
+        "You are a strict visual benchmark judge for short-video structure transfer. Inspect the rendered frames, the Remotion DSL, and the user's target. Return strict JSON only. Score real observable output; do not reward mock or unverifiable claims."
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            task: "Judge this rendered candidate and provide iteration guidance.",
+            candidateId: input.candidateId,
+            iterationIndex: input.iterationIndex,
+            userGoal: input.source.prompt,
+            productName: input.source.productName,
+            targetDurationSec: input.source.targetDurationSec,
+            sampleStructure: {
+              summary: input.sample.summary,
+              slots: input.sample.slots,
+              rhythmPattern: input.sample.rhythmPattern,
+              packagingPattern: input.sample.packagingPattern
+            },
+            materialSegments: input.materialSegments,
+            remotionDsl: input.remotionDsl,
+            previousScore: input.previousScore,
+            rewriteBrief: input.rewriteBrief,
+            outputSchema: {
+              score: {
+                totalScore: "0-100 number",
+                dimensionScores: [
+                  {
+                    id: "user_brief_alignment | uploaded_video_usage | hook_retention | visual_packaging | remotion_code_delta | safety_compliance",
+                    score: "number",
+                    maxScore: "number",
+                    evidence: ["observable evidence"],
+                    deductions: ["specific deduction"],
+                    fixInstruction: "specific fix"
+                  }
+                ],
+                hardFailures: [
+                  {
+                    code: "missing_required_material_use | no_remotion_code_delta | unsafe_content | render_failed | invalid_video | mock_mode",
+                    maxAllowedScore: "number",
+                    reason: "string"
+                  }
+                ],
+                topFixes: ["specific next actions"]
+              },
+              frameEvidence: [
+                {
+                  frameUrl: "copy one provided frameUrl",
+                  timestampSec: "number",
+                  observation: "what is visible and why it affects the score"
+                }
+              ],
+              reasons: ["short score rationale"],
+              nextRewriteBrief: "brief for the next Seedance iteration when score is below 90"
+            }
+          })
+        },
+        ...frames.map((frame) => ({
+          type: "image_url",
+          image_url: {
+            url: `data:image/jpeg;base64,${frame.base64}`,
+            detail: "low"
+          }
+        }))
+      ]
+    }
+  ];
+}
 
 function buildFallbackRemotionDsl(input: SeedanceRemotionCoderInput): RemotionCompositionDsl {
   const firstSegmentId = input.materialSegments[0]?.id;
@@ -326,6 +583,203 @@ function makeVisualDimension(id: BenchmarkScore["dimensionScores"][number]["id"]
     deductions: score >= maxScore ? [] : [reason],
     fixInstruction: reason
   };
+}
+
+function normalizeRemotionDsl(value: unknown, input: SeedanceRemotionCoderInput): RemotionCompositionDsl {
+  const fallback = buildFallbackRemotionDsl(input);
+  if (!value || typeof value !== "object") return fallback;
+  const candidate = value as Partial<RemotionCompositionDsl>;
+  const scenes = normalizeRemotionScenes(candidate.scenes, fallback.scenes);
+  return {
+    version: 1,
+    candidateName: typeof candidate.candidateName === "string" && candidate.candidateName.trim()
+      ? candidate.candidateName.trim()
+      : `SeedanceCandidate_${input.iterationIndex}`,
+    scenes
+  };
+}
+
+function normalizeRemotionScenes(value: unknown, fallbackScenes: RemotionCompositionDsl["scenes"]) {
+  if (!Array.isArray(value)) return fallbackScenes;
+  const allowedLayouts = new Set<RemotionCompositionDsl["scenes"][number]["layout"]>(["centered_caption", "split_reveal", "product_card", "media_clip", "cta"]);
+  const allowedMotions = new Set<RemotionCompositionDsl["scenes"][number]["motion"]>(["slow_push", "snap_zoom", "pan", "cut", "hold"]);
+  const scenes = value
+    .map((item, index) => {
+      if (!item || typeof item !== "object") return undefined;
+      const scene = item as Record<string, unknown>;
+      const startSec = cleanNonNegativeNumber(scene.startSec);
+      const endSec = cleanNonNegativeNumber(scene.endSec);
+      const layout = typeof scene.layout === "string" && allowedLayouts.has(scene.layout as RemotionCompositionDsl["scenes"][number]["layout"])
+        ? scene.layout as RemotionCompositionDsl["scenes"][number]["layout"]
+        : fallbackScenes[index]?.layout ?? "product_card";
+      const motion = typeof scene.motion === "string" && allowedMotions.has(scene.motion as RemotionCompositionDsl["scenes"][number]["motion"])
+        ? scene.motion as RemotionCompositionDsl["scenes"][number]["motion"]
+        : fallbackScenes[index]?.motion ?? "cut";
+      return {
+        id: typeof scene.id === "string" && scene.id.trim() ? scene.id.trim() : `scene-${index + 1}`,
+        startSec: startSec ?? fallbackScenes[index]?.startSec ?? index * 3,
+        endSec: Math.max(endSec ?? fallbackScenes[index]?.endSec ?? index * 3 + 3, startSec ?? fallbackScenes[index]?.startSec ?? index * 3),
+        layout,
+        caption: typeof scene.caption === "string" && scene.caption.trim() ? scene.caption.trim().slice(0, 80) : fallbackScenes[index]?.caption ?? "",
+        assetIds: cleanStringList(scene.assetIds) ?? fallbackScenes[index]?.assetIds ?? [],
+        motion
+      };
+    })
+    .filter((scene): scene is RemotionCompositionDsl["scenes"][number] => Boolean(scene))
+    .slice(0, 8);
+  return scenes.length ? scenes : fallbackScenes;
+}
+
+function normalizeJudgeScore(value: unknown, input: VisualBenchmarkJudgeInput): BenchmarkScore {
+  const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const totalScore = clampScore(typeof raw.totalScore === "number" ? raw.totalScore : 0);
+  const hardFailures = normalizeHardFailures(raw.hardFailures);
+  const accepted = totalScore >= 90 && hardFailures.length === 0;
+  return {
+    candidateId: input.candidateId,
+    iterationIndex: input.iterationIndex,
+    totalScore,
+    grade: accepted ? totalScore >= 95 ? "excellent" : "pass" : totalScore < 60 ? "fail" : "needs_iteration",
+    accepted,
+    threshold: {
+      regenerateBelow: 60,
+      targetScore: 90,
+      excellentFrom: 95,
+      maxIterations: 5
+    },
+    dimensionScores: normalizeJudgeDimensions(raw.dimensionScores),
+    hardFailures,
+    topFixes: cleanStringList(raw.topFixes) ?? ["Improve visual structure transfer, material use, opening hook, and packaging clarity."],
+    revisionBrief: accepted ? undefined : buildRevisionBriefFromJudge(input, totalScore, raw.dimensionScores)
+  };
+}
+
+function normalizeJudgeDimensions(value: unknown): BenchmarkScore["dimensionScores"] {
+  const allowed = new Map<BenchmarkScore["dimensionScores"][number]["id"], { label: string; maxScore: number }>([
+    ["user_brief_alignment", { label: "用户目标贴合", maxScore: 25 }],
+    ["uploaded_video_usage", { label: "上传视频结构与素材利用", maxScore: 20 }],
+    ["hook_retention", { label: "开头留存", maxScore: 20 }],
+    ["visual_packaging", { label: "视觉包装", maxScore: 15 }],
+    ["remotion_code_delta", { label: "Remotion 代码变化", maxScore: 10 }],
+    ["safety_compliance", { label: "安全合规", maxScore: 10 }]
+  ]);
+  const dimensions: BenchmarkScore["dimensionScores"] = [];
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (!item || typeof item !== "object") continue;
+      const raw = item as Record<string, unknown>;
+      const id = typeof raw.id === "string" && allowed.has(raw.id as BenchmarkScore["dimensionScores"][number]["id"])
+        ? raw.id as BenchmarkScore["dimensionScores"][number]["id"]
+        : undefined;
+      if (!id || dimensions.some((dimension) => dimension.id === id)) continue;
+      const meta = allowed.get(id)!;
+      const maxScore = typeof raw.maxScore === "number" && raw.maxScore > 0 ? raw.maxScore : meta.maxScore;
+      const score = clampScore(typeof raw.score === "number" ? raw.score : 0, maxScore);
+      const evidence = cleanStringList(raw.evidence) ?? ["Judge did not provide detailed evidence."];
+      dimensions.push({
+        id,
+        label: typeof raw.label === "string" && raw.label.trim() ? raw.label.trim() : meta.label,
+        maxScore,
+        score,
+        evidence,
+        deductions: cleanStringList(raw.deductions) ?? (score >= maxScore ? [] : evidence),
+        fixInstruction: typeof raw.fixInstruction === "string" && raw.fixInstruction.trim() ? raw.fixInstruction.trim() : evidence[0]
+      });
+    }
+  }
+  for (const [id, meta] of allowed) {
+    if (!dimensions.some((dimension) => dimension.id === id)) {
+      dimensions.push(makeVisualDimension(id, meta.label, meta.maxScore, 0, "Judge did not return this dimension."));
+    }
+  }
+  return dimensions;
+}
+
+function normalizeHardFailures(value: unknown): BenchmarkScore["hardFailures"] {
+  if (!Array.isArray(value)) return [];
+  const allowed = new Set<BenchmarkScore["hardFailures"][number]["code"]>([
+    "missing_required_material_use",
+    "no_remotion_code_delta",
+    "unsafe_content",
+    "render_failed",
+    "invalid_video",
+    "mock_mode",
+    "stagnant_iteration",
+    "sensitive_leak",
+    "empty_preview"
+  ]);
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return undefined;
+      const raw = item as Record<string, unknown>;
+      const code = typeof raw.code === "string" && allowed.has(raw.code as BenchmarkScore["hardFailures"][number]["code"])
+        ? raw.code as BenchmarkScore["hardFailures"][number]["code"]
+        : undefined;
+      if (!code) return undefined;
+      return {
+        code,
+        maxAllowedScore: typeof raw.maxAllowedScore === "number" ? clampScore(raw.maxAllowedScore) : 60,
+        reason: typeof raw.reason === "string" && raw.reason.trim() ? raw.reason.trim() : code
+      };
+    })
+    .filter((failure): failure is BenchmarkScore["hardFailures"][number] => Boolean(failure))
+    .slice(0, 4);
+}
+
+function buildRevisionBriefFromJudge(input: VisualBenchmarkJudgeInput, totalScore: number, dimensions: unknown): BenchmarkScore["revisionBrief"] {
+  const normalized = normalizeJudgeDimensions(dimensions)
+    .filter((dimension) => dimension.score < dimension.maxScore)
+    .sort((a, b) => (a.score / a.maxScore) - (b.score / b.maxScore))
+    .slice(0, 3);
+  return {
+    task: "revise_video_plan_from_benchmark",
+    targetScore: 90,
+    currentScore: totalScore,
+    failedDimensions: normalized.map((dimension) => ({
+      dimension: dimension.id,
+      score: dimension.score,
+      reason: dimension.deductions[0] ?? dimension.evidence[0] ?? "Needs improvement.",
+      instruction: dimension.fixInstruction
+    })),
+    mustKeep: ["Use the uploaded sample as structure evidence and the uploaded material as the candidate media pool."],
+    mustAvoid: ["Do not repeat the same Remotion scene structure without changing timing, layout, motion, or material mapping."],
+    rewriteScope: ["script", "timeline captions", "packaging", "transition", "beatHint", "rendererPrompt"]
+  };
+}
+
+function normalizeFrameEvidence(value: unknown, frames: RenderedEvidenceFrame[]): JudgeFrameEvidence[] {
+  if (!Array.isArray(value)) {
+    return frames.slice(0, 3).map((frame) => ({
+      frameUrl: frame.frameUrl,
+      framePath: frame.framePath,
+      timestampSec: frame.timestampSec,
+      observation: "Frame extracted for visual judging."
+    }));
+  }
+  const byUrl = new Map(frames.map((frame) => [frame.frameUrl, frame]));
+  const evidence = value
+    .map((item): JudgeFrameEvidence | undefined => {
+      if (!item || typeof item !== "object") return undefined;
+      const raw = item as Record<string, unknown>;
+      const requestedUrl = typeof raw.frameUrl === "string" ? raw.frameUrl : undefined;
+      const sourceFrame = requestedUrl ? byUrl.get(requestedUrl) : undefined;
+      const fallbackFrame = frames[0];
+      if (!sourceFrame && !fallbackFrame) return undefined;
+      const frame = sourceFrame ?? fallbackFrame;
+      return {
+        frameUrl: frame.frameUrl,
+        framePath: frame.framePath,
+        timestampSec: typeof raw.timestampSec === "number" ? raw.timestampSec : frame.timestampSec,
+        observation: typeof raw.observation === "string" && raw.observation.trim() ? raw.observation.trim() : "Frame was inspected by the visual judge."
+      };
+    })
+    .filter((frame): frame is JudgeFrameEvidence => Boolean(frame))
+    .slice(0, 6);
+  return evidence.length ? evidence : normalizeFrameEvidence(undefined, frames);
+}
+
+function clampScore(value: number, max = 100) {
+  return Math.max(0, Math.min(max, Math.round(value)));
 }
 
 export type ModelVideoUnderstandingInput = {
@@ -1639,6 +2093,40 @@ async function requestVideoUnderstanding(input: ModelVideoUnderstandingInput, fr
       error: error instanceof Error ? error.message : "Unknown Ark vision adapter error."
     };
   }
+}
+
+async function requestArkChatContent(model: string, messages: unknown[], timeoutMs: number, maxTokens: number, temperature: number) {
+  const apiKey = process.env.ARK_API_KEY;
+  if (!apiKey) throw new Error("ARK_API_KEY is not configured.");
+  const baseUrl = normalizeBaseUrl(process.env.ARK_BASE_URL || "https://ark.cn-beijing.volces.com/api/v3");
+  const response = await fetchWithTimeout(
+    `${baseUrl}/chat/completions`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature,
+        max_tokens: maxTokens
+      })
+    },
+    timeoutMs
+  );
+
+  if (!response.ok) {
+    throw new Error(`Ark request failed with ${response.status}: ${await safeResponseText(response)}`);
+  }
+
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  };
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error("Ark response did not include message content.");
+  return content;
 }
 
 async function sampleVideoFrames(filePath: string, videoId: string, durationSec?: number) {

@@ -1,7 +1,9 @@
 import type { CSSProperties } from "react";
-import { RefreshCcw, Send } from "lucide-react";
+import { Code2, FileVideo2, RefreshCcw, ScanSearch, Send } from "lucide-react";
 import { benchmarkGradeLabel, formatHistoryTime, historyDuration } from "../historyStore";
 import type { HistoryEntry } from "../workbenchTypes";
+
+type HistoryIteration = HistoryEntry["result"]["iterations"][number];
 
 export function HistoryWorkspace(props: {
   entries: HistoryEntry[];
@@ -31,8 +33,10 @@ export function HistoryWorkspace(props: {
 
       {props.entries.length ? (
         <div className={`history-grid ${props.entries.length === 1 ? "single" : ""}`} aria-label="历史记录列表">
-          {props.entries.map((entry) => (
-            <article key={entry.id} className={`history-card ${entry.accepted ? "accepted" : "needs-work"}`}>
+          {props.entries.map((entry) => {
+            const hasMockIteration = entry.result.iterations.some(isMockIteration);
+            return (
+            <article key={entry.id} className={`history-card ${entry.accepted ? "accepted" : "needs-work"} ${hasMockIteration ? "mock-locked" : ""}`}>
               <header>
                 <span>{formatHistoryTime(entry.createdAt)}</span>
                 <strong>{benchmarkGradeLabel(entry.grade)}</strong>
@@ -44,6 +48,8 @@ export function HistoryWorkspace(props: {
                 <span>{historyDuration(entry.result)} 秒</span>
                 <span>{entry.result.generated.timeline.length} 段</span>
               </div>
+              <HistoryIterationSummary entry={entry} />
+              <HistoryIterationDetails entry={entry} />
               <div className="history-score">
                 <div>
                   <strong>{entry.score}</strong>
@@ -60,7 +66,8 @@ export function HistoryWorkspace(props: {
                 </button>
               </div>
             </article>
-          ))}
+            );
+          })}
           {props.entries.length === 1 ? <HistoryInsightPanel entry={props.entries[0]} /> : null}
         </div>
       ) : (
@@ -77,6 +84,90 @@ export function HistoryWorkspace(props: {
       )}
     </section>
   );
+}
+
+function HistoryIterationSummary(props: { entry: HistoryEntry }) {
+  const iterations = props.entry.result.iterations;
+  const best = iterations.find((iteration) => iteration.isBest) ?? iterations.at(-1);
+  const mockCount = iterations.filter(isMockIteration).length;
+  return (
+    <div className={`history-iteration-strip ${mockCount ? "mock" : "real"}`}>
+      <span>{iterations.length ? `${iterations.length} 轮迭代成品` : "无迭代成品"}</span>
+      <span>{best ? `最佳第 ${best.iterationIndex + 1} 轮` : "未记录最佳轮次"}</span>
+      <span>{mockCount ? "mock 锁分" : "真实评审"}</span>
+    </div>
+  );
+}
+
+function HistoryIterationDetails(props: { entry: HistoryEntry }) {
+  const iterations = props.entry.result.iterations;
+  if (!iterations.length) return null;
+  return (
+    <details className="history-iterations">
+      <summary>查看迭代成品与评分原因</summary>
+      <div className="history-iteration-list">
+        {iterations.map((iteration) => {
+          const outputUrl = iterationOutputUrl(iteration);
+          return (
+            <article key={`${iteration.candidateId}-${iteration.iterationIndex}`}>
+              <header>
+                <span>
+                  第 {iteration.iterationIndex + 1} 轮
+                  {iteration.isBest ? " · 当前采用" : ""}
+                </span>
+                <strong>{iteration.benchmarkScore.totalScore}/100</strong>
+              </header>
+              <div className="history-iteration-actions">
+                {outputUrl ? (
+                  <a href={outputUrl} target="_blank" rel="noreferrer">
+                    <FileVideo2 size={14} aria-hidden="true" />
+                    打开视频
+                  </a>
+                ) : null}
+                <span>
+                  <Code2 size={14} aria-hidden="true" />
+                  {iteration.remotionArtifact?.codeHash ?? "无代码 hash"}
+                </span>
+                <span>
+                  <ScanSearch size={14} aria-hidden="true" />
+                  {iteration.visualBenchmark?.mockMode ? "mock judge" : iteration.visualBenchmark?.model ?? "visual judge"}
+                </span>
+              </div>
+              <p>{iterationReason(iteration)}</p>
+              <small>{iterationProviderLabel(iteration)}</small>
+            </article>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+function isMockIteration(iteration: HistoryIteration) {
+  return Boolean(
+    iteration.visualBenchmark?.mockMode ||
+    iteration.remotionArtifact?.mockMode ||
+    iteration.benchmarkScore.hardFailures.some((failure) => failure.code === "mock_mode")
+  );
+}
+
+function iterationOutputUrl(iteration: HistoryIteration) {
+  return iteration.remotionArtifact?.outputUrl ?? iteration.demo.url;
+}
+
+function iterationReason(iteration: HistoryIteration) {
+  return (
+    iteration.visualBenchmark?.reasons[0] ??
+    iteration.benchmarkScore.hardFailures[0]?.reason ??
+    iteration.benchmarkScore.topFixes[0] ??
+    iteration.demo.note
+  );
+}
+
+function iterationProviderLabel(iteration: HistoryIteration) {
+  const coder = iteration.remotionArtifact?.provider === "seedance" ? (iteration.remotionArtifact.model ?? "Seedance Remotion Coder") : "mock Seedance coder";
+  const judge = iteration.visualBenchmark?.provider === "ark" ? (iteration.visualBenchmark.model ?? "Ark visual judge") : "mock visual judge";
+  return `${coder} · ${judge}`;
 }
 
 function HistoryInsightPanel(props: { entry: HistoryEntry }) {
