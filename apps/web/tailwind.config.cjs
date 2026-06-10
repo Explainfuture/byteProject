@@ -4,37 +4,44 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        canvas: "#f4efe6",
-        ink: "#241f1c",
-        "ink-soft": "#4c423b",
-        muted: "#766b62",
-        "muted-2": "#9a8d82",
-        line: "#dfd2c3",
-        surface: "#fffdf9",
-        "surface-soft": "#fbf5ed",
-        accent: "#8b4e32",
-        "accent-strong": "#6f3426",
-        "accent-soft": "#f3d9c4",
-        teal: "#276861",
-        "teal-soft": "#d9ece7",
+        canvas: "#fff8f4",
+        ink: "#201b15",
+        "ink-soft": "#362f29",
+        muted: "#57423b",
+        "muted-2": "#8a726a",
+        line: "#dec0b7",
+        surface: "#ffffff",
+        "surface-soft": "#f8ece2",
+        accent: "#9e3d16",
+        "accent-strong": "#812801",
+        "accent-soft": "#ffdbcf",
+        teal: "#7d562d",
+        "teal-soft": "#ffdcbd",
         violet: "#51406f",
         "violet-soft": "#e8e1f0",
-        danger: "#a33b31"
+        danger: "#ba1a1a"
       },
       boxShadow: {
-        soft: "0 18px 48px rgba(58, 45, 35, 0.10)",
-        panel: "0 24px 70px rgba(58, 45, 35, 0.14)"
+        soft: "0 8px 20px rgba(54, 47, 41, 0.06)",
+        panel: "0 16px 40px rgba(54, 47, 41, 0.08)"
       },
       fontFamily: {
         sans: [
-          "ui-sans-serif",
-          "system-ui",
+          "Inter",
+          "Geist",
+          "SF Pro Text",
+          "SF Pro Display",
+          "Alibaba PuHuiTi",
+          "Alibaba PuHuiTi 2.0",
+          "HarmonyOS Sans SC",
+          "Source Han Sans SC",
+          "Noto Sans SC",
+          "PingFang SC",
+          "Microsoft YaHei UI",
+          "Microsoft YaHei",
           "-apple-system",
           "BlinkMacSystemFont",
           "Segoe UI",
-          "Microsoft YaHei UI",
-          "Microsoft YaHei",
-          "Noto Sans SC",
           "sans-serif"
         ]
       }
